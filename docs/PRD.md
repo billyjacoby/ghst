@@ -44,7 +44,7 @@ Recreate Warp's Next Command for **plain zsh in any terminal**, with no other to
 
 - `[auto]` In plain zsh (`zsh -f` plus the ghst init line) under a pty harness, after any command a prediction appears within **1.5 s p50, 3 s p95** of the prompt drawing, using the command's real output (measured against a real provider when a key is available, else reported as provider latency plus measured local overhead).
 - `[human]` The same holds in real Terminal.app and Ghostty windows.
-- `[auto]` After a failed command, the prediction is a plausible fix in at least **60 percent** of the eval set (T03), on the hosted model.
+- `[auto]` After a failed command, the prediction is a plausible fix in at least **60 percent** of the eval set (T03), on the hosted model (if no API key is available, see "Real model calls" in section 7.0).
 - `[human]` Accept rate of shown predictions is at least **25 percent** over a week of daily use (measured by T12 metrics).
 - `[auto]` The PTY proxy is invisible for every item in the T01 matrix that can be automated; added keystroke latency under **1 ms**; `cat` of a 100 MB file at least **90 percent** as fast as without it.
 - `[human]` The proxy feels invisible in real terminal windows (resize, mouse, vim, ssh).
@@ -246,7 +246,6 @@ When one of these comes up, the builder pauses only the affected line of work, c
 - Lowering or removing a success criterion.
 - Anything outward-facing: pushing to `main`, tags, GitHub releases (publishing one triggers `.github/workflows/release.yml`, which uploads to PyPI), publishing to PyPI or crates.io, commenting on or closing issues and PRs in this repo, filing issues or PRs on other projects.
 - Anything that needs `sudo`, edits to `~/Developer/nix-darwin-config` or Nix-managed files, or global installs.
-- API spend beyond the build budget: **$25 in total** unless the kickoff prompt sets another number. The builder tracks spend in the build log.
 - A new dependency under a copyleft license (GPL, AGPL, LGPL for statically linked Rust), since ghst is MIT.
 
 #### Human steps never block the build
@@ -255,6 +254,14 @@ Every step marked **[human]** is appended to `docs/HUMAN_CHECKLIST.md` with what
 
 - **Terminal feel checks:** the automated test matrix is the gate. Real-window checks happen in T21.
 - **`sudo fm license`:** implement and unit-test the `apple` provider against a mocked server, and run evals on the hosted model only. The default provider for `next` stays the hosted model until Matt runs the `fm` eval.
+
+#### Real model calls
+
+The build agents run on Matt's Claude Code subscription. ghst itself does not: it calls the provider's API directly, which needs an `ANTHROPIC_API_KEY` billed through the API Console. Never route ghst's calls through Claude Code or subscription credentials. Real calls are needed only for T03 evals and the latency checks in section 2.
+
+- **Key in the environment:** use it for those checks. No spending cap applies, but keep runs proportionate: the eval set once per prompt change, not in loops.
+- **No key, `fm` licensed:** run the evals on `fm`, and record that hosted-model numbers are pending.
+- **Neither:** use the stub provider; the `[auto]` criteria that need a real model (latency and fix rate) move to `docs/HUMAN_CHECKLIST.md` with the exact command to run.
 
 #### Git
 
@@ -275,7 +282,7 @@ Every step marked **[human]** is appended to `docs/HUMAN_CHECKLIST.md` with what
 
 #### State and resume
 
-`docs/BUILD_LOG.md` holds, in this order: open escalations; a task status table (todo, in progress, done, blocked, with the branch and a link to the task report); API spend so far; and a dated log of wave merges. The builder updates it whenever a task finishes or a ruling lands, so a fresh or compacted builder session can resume from it alone.
+`docs/BUILD_LOG.md` holds, in this order: open escalations; a task status table (todo, in progress, done, blocked, with the branch and a link to the task report); which real model, if any, the evals ran on; and a dated log of wave merges. The builder updates it whenever a task finishes or a ruling lands, so a fresh or compacted builder session can resume from it alone.
 
 ### 7.1 How to hand these off
 
@@ -539,7 +546,7 @@ Shared files: within a wave, only one task edits a given file. `src/ghst/config.
 ### T22. Integration PR (builder)
 
 - **Depends on:** every task in waves 0 to 6.
-- **Do:** on `build/next-command`, run the full Python, Rust, and zpty suites plus the T03 eval; check every `[auto]` criterion in section 2 and record the measured numbers. Open one PR to `main` whose description has: what was built, the `[auto]` criteria with numbers, a link to `docs/decisions.md` with the rulings that changed this PRD called out, open escalations, the contents of `docs/HUMAN_CHECKLIST.md`, and API spend.
+- **Do:** on `build/next-command`, run the full Python, Rust, and zpty suites plus the T03 eval; check every `[auto]` criterion in section 2 and record the measured numbers. Open one PR to `main` whose description has: what was built, the `[auto]` criteria with numbers, a link to `docs/decisions.md` with the rulings that changed this PRD called out, open escalations, the contents of `docs/HUMAN_CHECKLIST.md`, and which real model the evals ran on.
 - **Done when:** the PR is open, CI is green, and nothing in `docs/BUILD_LOG.md` is left in progress. Do not merge it.
 
 ### Later
@@ -583,3 +590,4 @@ Each has an owner and a default, so none blocks the build.
 - 2026-11-24: autonomous build protocol (section 7.0), `[auto]`/`[human]` criteria, owners for open questions, T10 moved after T11, T22 added.
 - 2026-11-24: removed the v0.5 `AGENTS.md` from this branch; its still-valid lessons moved to section 5.1; T20 writes a new one.
 - 2026-11-24: public-repo rules (section 7.0), only the integration branch is pushed, socket hardening in T04, CI hygiene in T18, `SECURITY.md` in T20, `.scratch/` and `target/` gitignored.
+- 2026-11-24: removed the API spend cap; added "Real model calls" (section 7.0) for running with or without an API key.
