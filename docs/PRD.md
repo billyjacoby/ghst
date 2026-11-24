@@ -5,6 +5,10 @@ Date: 2026-11-24 (revised the same day: plain zsh in any terminal is the baselin
 Owner: Matt
 Supersedes: `docs/REBUILD_PLAN.md` (2026-10-02). `docs/PLAN.md` remains the record of the original goals.
 
+**Precedence.** Where `AGENTS.md`, `docs/PLAN.md`, `docs/REBUILD_PLAN.md`, or `docs/autocomplete-flow.md` conflict with this PRD, this PRD wins. In particular, the `AGENTS.md` design notes on drawing through `/dev/tty`, auto-reload by `.py` mtime, and the file layout describe v0.5, which this work replaces. T20 brings `AGENTS.md` in line at the end.
+
+This PRD is built autonomously by agents; section 7.0 defines who decides what.
+
 ---
 
 ## 1. Problem
@@ -36,13 +40,17 @@ Recreate Warp's Next Command for **plain zsh in any terminal**, with no other to
 
 ### Success criteria
 
-- In plain zsh (`zsh -f` plus the ghst init line) in Terminal.app and in Ghostty, after any command a prediction appears within **1.5 s p50, 3 s p95** of the prompt drawing, using the command's real output.
-- After a failed command, the prediction is a plausible fix in at least **60 percent** of the eval set (T03).
-- Accept rate of shown predictions is at least **25 percent** over a week of daily use (measured by T12 metrics).
-- The PTY proxy is invisible: vim, less, fzf, htop, ssh, tmux, job control, bracketed paste, mouse, and window resize behave exactly as without it; added keystroke latency under **1 ms**; `cat` of a 100 MB file at least **90 percent** as fast as without it.
-- Zero display corruption: no orphaned ghost text after resize, line wrap, `clear`, Ctrl-C, or `zle reset-prompt`.
-- No per-keystroke LLM calls in the default configuration. No `python3` or `socat` process started by the shell side, ever.
-- Output never leaves the machine unless the user opted in, and always passes secret redaction first.
+`[auto]` criteria are verified by the build agents in pty-driven tests and must pass before the final PR (T22). `[human]` criteria are confirmed by Matt after the build (T21) and do not block it.
+
+- `[auto]` In plain zsh (`zsh -f` plus the ghst init line) under a pty harness, after any command a prediction appears within **1.5 s p50, 3 s p95** of the prompt drawing, using the command's real output (measured against a real provider when a key is available, else reported as provider latency plus measured local overhead).
+- `[human]` The same holds in real Terminal.app and Ghostty windows.
+- `[auto]` After a failed command, the prediction is a plausible fix in at least **60 percent** of the eval set (T03), on the hosted model.
+- `[human]` Accept rate of shown predictions is at least **25 percent** over a week of daily use (measured by T12 metrics).
+- `[auto]` The PTY proxy is invisible for every item in the T01 matrix that can be automated; added keystroke latency under **1 ms**; `cat` of a 100 MB file at least **90 percent** as fast as without it.
+- `[human]` The proxy feels invisible in real terminal windows (resize, mouse, vim, ssh).
+- `[auto]` Zero display corruption in zpty tests: no orphaned ghost text after line wrap, `clear`, Ctrl-C, or `zle reset-prompt`, and correct state after a simulated resize.
+- `[auto]` No per-keystroke LLM calls in the default configuration. No `python3` or `socat` process started by the shell side, ever.
+- `[auto]` Output never leaves the machine unless the user opted in, and always passes secret redaction first (tests assert on every outbound request body).
 
 ### Non-goals
 
@@ -174,33 +182,113 @@ At each `end` marker the proxy sends an `output` frame: `session` (the shell's P
 
 ## 7. Tasks
 
+### 7.0 Running the build autonomously
+
+#### Roles
+
+- **Builder** (Opus): the orchestrating session. Plans each wave, spawns one task agent per task, merges finished work, verifies every "Done when" on the merged result, keeps the build log, and asks the arbiter for rulings. It does not settle "needs a ruling" matters on its own.
+- **Task agents** (Opus): one per task, each in its own worktree. They report back to the builder, never to Matt or the arbiter directly.
+- **Arbiter** (Fable): rules on decisions and new findings so Matt is not interrupted. Use **one long-lived arbiter** for the whole build (continue it with SendMessage rather than spawning a new one per question) so its rulings stay consistent. Before each ruling it rereads this PRD and `docs/decisions.md`, and it checks the files and spike docs it relies on itself instead of trusting the builder's summary.
+- **Matt**: only for the escalation list below and the post-build checklist.
+
+#### What needs a ruling
+
+The builder asks the arbiter when:
+
+- a task has to deviate from this PRD (different design, dependency, file layout, or protocol);
+- a spike result changes downstream tasks (T01, T02, the Atuin question in T08, T03 numbers);
+- there are two reasonable options with lasting consequences (hard to reverse, user-visible, or crossing task boundaries);
+- a "Done when" check cannot be met as written and a substitute check is proposed;
+- an open question in section 8 becomes blocking.
+
+Choices inside one task that are easy to reverse and do not change an interface need no ruling. The task agent decides and notes it in its report.
+
+#### Ruling request and answer
+
+Request, written by the builder:
+
+```
+Question:        one sentence
+Context:         PRD sections, file paths, spike docs (paths, not pasted dumps)
+Options:         each with evidence and consequences
+Reversibility:   what undoing each option would cost
+Recommendation:  the builder's pick, stated last
+```
+
+Answer, written by the arbiter:
+
+```
+Ruling:          the decision
+Rationale:       why, citing what it checked
+PRD changes:     exact edits, or "none"
+Follow-ups:      tasks affected and what changes for them
+Escalate:        yes or no (yes only for items on the escalation list)
+```
+
+Every ruling is appended to `docs/decisions.md` as `R-NNN` with the date, question, ruling, rationale, and affected tasks. If a ruling changes this PRD, the builder edits the PRD in the same commit and adds a line to section 10. Rulings are binding for the build unless Matt overturns them later.
+
+#### Escalate to Matt (the arbiter cannot rule)
+
+When one of these comes up, the builder pauses only the affected line of work, continues independent tasks, and lists the item at the top of `docs/BUILD_LOG.md`:
+
+- T01 is a no-go, or any change would drop the plain-zsh baseline or a P0 goal.
+- Any change to privacy defaults (`share_output`, `never_send`, what leaves the machine) or anything that weakens redaction.
+- Lowering or removing a success criterion.
+- Anything outward-facing: pushing to `main`, tags, releases, publishing to PyPI or crates.io, filing issues or PRs on other projects.
+- Anything that needs `sudo`, edits to `~/Developer/nix-darwin-config` or Nix-managed files, or global installs.
+- API spend beyond the build budget: **$25 in total** unless the kickoff prompt sets another number. The builder tracks spend in the build log.
+- A new dependency under a copyleft license (GPL, AGPL, LGPL for statically linked Rust), since ghst is MIT.
+
+#### Human steps never block the build
+
+Every step marked **[human]** is appended to `docs/HUMAN_CHECKLIST.md` with what to do and what it would change, and the build continues with the fallback stated in the task. The general fallbacks:
+
+- **Terminal feel checks:** the automated test matrix is the gate. Real-window checks happen in T21.
+- **`sudo fm license`:** implement and unit-test the `apple` provider against a mocked server, and run evals on the hosted model only. The default provider for `next` stays the hosted model until Matt runs the `fm` eval.
+
+#### Git
+
+- Integration branch: `build/next-command`, created from `docs/next-command-prd`.
+- Task branches: `prd/<task-id>-<slug>` in worktrees, merged into the integration branch by the builder at the end of each wave, after the merged result passes every "Done when" from that wave plus the full test suite.
+- The builder may push the integration branch and task branches. It never pushes to `main`.
+- The build ends with T22: one PR from `build/next-command` to `main`.
+
+#### State and resume
+
+`docs/BUILD_LOG.md` holds, in this order: open escalations; a task status table (todo, in progress, done, blocked, with the branch and a link to the task report); API spend so far; and a dated log of wave merges. The builder updates it whenever a task finishes or a ruling lands, so a fresh or compacted builder session can resume from it alone.
+
 ### 7.1 How to hand these off
 
 Each task below is written to be given to a subagent as-is. The agent gets this PRD plus the task ID.
 
 Conventions for every task:
 
-- Work in an isolated git worktree on a branch named `prd/<task-id>-<slug>`. Do not commit to `main`, push, or open PRs unless the delegating session says so.
+- Work in an isolated git worktree on the task branch named in section 7.0. Commit there. Do not push, merge, or open PRs; the builder does that.
 - Read `AGENTS.md` and this PRD's sections 2, 4, and 5 before starting.
 - Python work is done only when `uv run pytest`, `uv run ruff check src/`, and `uv run basedpyright src/ghst/` all pass. Rust work is done only when `cargo nextest run`, `cargo clippy -- -D warnings`, and `cargo fmt --check` pass.
 - zsh files must pass `zsh -n`. Shell tests use the zpty harness from T13 once it exists, and run against **plain zsh first** (`zsh -f`, no plugins), then the plugin setup.
 - Do not edit `~/Developer/nix-darwin-config` or anything under `~/.config` that is a Nix store symlink. Use temporary config dirs (`XDG_CONFIG_HOME`, `ATUIN_CONFIG_DIR`, a temp `ZDOTDIR`) for experiments.
 - Never use em dashes or middle dots in code, comments, or docs.
-- Steps marked **[human]** need Matt (sudo, interactive feel in a real terminal window, Nix activation). The agent stops and lists them in its report instead of working around them.
-- Hand back a short report: what changed (files), how it was verified (commands and results), open questions, and anything marked [human].
+- Steps marked **[human]** need Matt (sudo, interactive feel in a real terminal window, Nix activation). The agent does not attempt or work around them; it lists them in its report, and the builder moves them to `docs/HUMAN_CHECKLIST.md`.
+- If something in this PRD looks wrong or a better approach turns up, finish what is clearly in scope, then raise it in the report as a proposed ruling (section 7.0 format). Do not change the design unilaterally.
+- Hand back a short report: what changed (files), how it was verified (commands and results), decisions made inside the task, proposed rulings, and anything marked [human].
 
 ### 7.2 Dependency map
 
 ```
 Wave 0 (parallel)   T01 proxy spike     T02 render spike     T03 eval harness     T04 frame protocol
-Wave 1 (parallel)   T05 zsh markers     T06 ghst-pty (T01 T04)     T09 HistorySource     T10 fm provider     T11 config+privacy
-Wave 2 (parallel)   T07 proxy launch (T05 T06)     T08 OutputSource (T04 T06)     T13 zpty harness (T02)
+Wave 1 (parallel)   T05 zsh markers     T06 ghst-pty (T01 T04)     T09 HistorySource     T11 config+privacy
+Wave 2 (parallel)   T07 proxy launch (T05 T06)     T08 OutputSource (T04 T06)     T10 fm provider (T11)     T13 zpty harness (T02)
 Wave 3              T12 daemon `next` (T04 T08 T09 T11)
 Wave 4 (parallel)   T14 next display (T02 T05 T12 T13)     T16 Ctrl+G port (T04 T13)     T18 packaging (T06)
 Wave 5 (parallel)   T15 prefix continuation (T14)     T17 remove legacy (T14 T16)
-Wave 6              T19 setup + doctor (T07 T08 T10 T11 T18)     T20 docs (T17)     T21 dogfood [human]
+Wave 6              T19 setup + doctor (T07 T08 T10 T11 T18)     T20 docs (T17)
+Wave 7              T22 integration PR (all above)
+After the build     T21 dogfood [human]
 Later               T30 NL history search     T31 typing-time LLM
 ```
+
+Shared files: within a wave, only one task edits a given file. `src/ghst/config.py` belongs to T11 in wave 1 (T10 runs after it); `src/ghst/daemon.py` changes in T04 and T12 only; `src/ghst/cli.py` changes in T07, T17, and T19, which are in different waves. If a task needs a change in a file another task in the same wave owns, it asks the builder instead of editing it.
 
 ---
 
@@ -214,8 +302,9 @@ Later               T30 NL history search     T31 typing-time LLM
   2. Parse the output stream for the 4.1 markers (a byte-level state machine, not regex over chunks: markers can split across reads), strip them, and write each captured command's output to a debug file.
   3. Track alternate screen (`ESC [ ? 1049 h/l`, `47`, `1047`) and exclude alt-screen bytes from capture.
   4. Confirm OSC 4478 is unused (search terminal docs and source for kitty, iTerm2, WezTerm, Ghostty, VTE, foot, tmux). Pick another number if not.
-- **Test matrix (automate what you can with `script`, `tmux`, or `expect`; list the rest for the human):** vim, less, fzf, htop, `ssh localhost`, tmux inside the proxy, Ctrl-C, Ctrl-Z and `fg`, bracketed paste of multi-line text, mouse in vim, resize during vim and at the prompt, `cat` of a 100 MB file (time vs direct), keystroke echo latency, a command printing 5,000 lines, a binary-output command, UTF-8 and wide characters, terminal queries (`printf '\e[c'`, `\e[>q`) round-tripping.
+- **Test matrix (automate what you can with `script`, `tmux`, or `expect`; list the rest for the human):** vim, less, fzf, htop, `ssh localhost` (skip and note it if Remote Login is off), tmux inside the proxy, Ctrl-C, Ctrl-Z and `fg`, bracketed paste of multi-line text, mouse in vim, resize during vim and at the prompt, `cat` of a 100 MB file (time vs direct), keystroke echo latency, a command printing 5,000 lines, a binary-output command, UTF-8 and wide characters, terminal queries (`printf '\e[c'`, `\e[>q`) round-tripping.
 - **Deliverable:** the prototype crate and `docs/spikes/T01-pty-proxy.md`: what works, measured latency and throughput, failures and their causes, the confirmed OSC number, and a go/no-go for T06.
+- **Gate:** go means every automated matrix item passes and the section 2 latency and throughput targets are met, or the failures have a fix that T06 can make. A borderline result goes to the arbiter. A no-go is escalated to Matt (section 7.0); meanwhile, waves that do not depend on T06 continue.
 - **[human]:** 15 minutes in Terminal.app and Ghostty under the prototype (resize, vim, fzf, ssh, tmux), with notes on anything that feels off.
 
 ### T02. Spike: empty-prompt ghost text through ZLE
@@ -309,7 +398,7 @@ Later               T30 NL history search     T31 typing-time LLM
 
 ### T10. Apple `fm serve` as a provider
 
-- **Depends on:** none. **Parallel with:** wave 1.
+- **Depends on:** T11 (owns `config.py` in wave 1). **Parallel with:** wave 2.
 - **Read first:** `src/ghst/llm.py`, `src/ghst/config.py` (`_default_api_base_url`), `fm --help` (after the license is accepted).
 - **Do:** add `provider.name = "apple"`: OpenAI-compatible client against a local `fm serve` URL, no API key, and a context budget setting (default 4,000 tokens) that prompt builders use to shrink output and history. Optionally start `fm serve` as a daemon child if it is not running. Only offered on macOS 27+.
 - **Done when:** unit tests with a mocked HTTP server; `ghst status` shows the provider; a prompt over budget is trimmed (output first, then history).
@@ -421,8 +510,14 @@ Later               T30 NL history search     T31 typing-time LLM
 
 ### T21. Dogfood week [human]
 
-- **Depends on:** T15, T16, T19.
-- One week of daily use: mostly in Matt's full setup (Ghostty, Atuin, plugins), plus at least two sessions in plain zsh in Terminal.app. Check `ghst status` metrics against section 2. Decide on T30 and T31. Then wire ghst into Home Manager in `nix-darwin-config` (separate repo, separate change).
+- **Depends on:** T22 (runs after the build, from the integration branch).
+- Work through `docs/HUMAN_CHECKLIST.md`, then one week of daily use: mostly in Matt's full setup (Ghostty, Atuin, plugins), plus at least two sessions in plain zsh in Terminal.app. Check `ghst status` metrics against the `[human]` criteria in section 2. Review `docs/decisions.md` and overturn anything that needs it. Decide on T30 and T31. Then wire ghst into Home Manager in `nix-darwin-config` (separate repo, separate change).
+
+### T22. Integration PR (builder)
+
+- **Depends on:** every task in waves 0 to 6.
+- **Do:** on `build/next-command`, run the full Python, Rust, and zpty suites plus the T03 eval; check every `[auto]` criterion in section 2 and record the measured numbers. Open one PR to `main` whose description has: what was built, the `[auto]` criteria with numbers, a link to `docs/decisions.md` with the rulings that changed this PRD called out, open escalations, the contents of `docs/HUMAN_CHECKLIST.md`, and API spend.
+- **Done when:** the PR is open, CI is green, and nothing in `docs/BUILD_LOG.md` is left in progress. Do not merge it.
 
 ### Later
 
@@ -438,11 +533,15 @@ Later               T30 NL history search     T31 typing-time LLM
 
 ## 8. Open questions
 
-1. Is a 1 to 1.5 s delay after the prompt acceptable, or should the daemon start predicting when the proxy reports command end, before `precmd`, to save the prompt-drawing time?
-2. Should a `fix` prediction look different from a `next` prediction (color, a leading marker)?
-3. Default provider for `next`: hosted fast model or `fm`? Decide from T03 numbers.
-4. Should ghst keep a log of its own predictions and acceptances for evals, and where?
-5. Should ghst-pty also be offered to Atuin users instead of Atuin's proxy, or always defer to Atuin's when present?
+Each has an owner and a default, so none blocks the build.
+
+| # | Question | Owner | Default until ruled |
+|---|---|---|---|
+| 1 | Is a 1 to 1.5 s delay after the prompt acceptable, or should the daemon start predicting when the proxy reports command end, before `precmd`? | Arbiter, after T12 latency numbers | Start in `precmd`. |
+| 2 | Should a `fix` prediction look different from a `next` prediction (color, a leading marker)? | Arbiter, during T14 | Same ghost color; `fix` uses the warning color for a one-character marker after the text. |
+| 3 | Default provider for `next`: hosted fast model or `fm`? | Matt, after running the `fm` eval (checklist item) | Hosted fast model. |
+| 4 | Should ghst keep a local log of its predictions and acceptances for evals, and where? | Arbiter (privacy aspects escalate) | Counts only, in memory. No prediction text stored. |
+| 5 | Should ghst-pty be offered to Atuin users instead of Atuin's proxy, or always defer to Atuin's? | Arbiter, after T08 | Defer to Atuin's when it is active and its output is retrievable; otherwise use ghst-pty. |
 
 ## 9. References
 
@@ -453,3 +552,9 @@ Later               T30 NL history search     T31 typing-time LLM
 - zsh-autosuggestions: https://github.com/zsh-users/zsh-autosuggestions
 - Ghostty shell integration: https://ghostty.org/docs/features/shell-integration
 - macOS 27 `fm` CLI: https://modelfit.io/blog/macos-27-fm-cli-local-model-terminal/
+
+## 10. Changelog
+
+- 2026-11-24: first draft (Next Command for Ghostty with Atuin).
+- 2026-11-24: plain zsh in any terminal is the baseline; `ghst-pty` added.
+- 2026-11-24: autonomous build protocol (section 7.0), `[auto]`/`[human]` criteria, owners for open questions, T10 moved after T11, T22 added.
