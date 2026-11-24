@@ -5,7 +5,7 @@ Date: 2026-11-24 (revised the same day: plain zsh in any terminal is the baselin
 Owner: Matt
 Supersedes: `docs/REBUILD_PLAN.md` (2026-10-02). `docs/PLAN.md` remains the record of the original goals.
 
-**Precedence.** Where `AGENTS.md`, `docs/PLAN.md`, `docs/REBUILD_PLAN.md`, or `docs/autocomplete-flow.md` conflict with this PRD, this PRD wins. In particular, the `AGENTS.md` design notes on drawing through `/dev/tty`, auto-reload by `.py` mtime, and the file layout describe v0.5, which this work replaces. T20 brings `AGENTS.md` in line at the end.
+**Precedence.** This PRD is the only agent instruction file on this branch. The v0.5 `AGENTS.md` was removed because its design notes (drawing through `/dev/tty`, auto-reload by `.py` mtime, the file layout) contradict this work; the lessons from it that still apply are in section 5.1. Where `docs/PLAN.md`, `docs/REBUILD_PLAN.md`, `docs/autocomplete-flow.md`, or `README.md` conflict with this PRD, this PRD wins. T20 writes a new `AGENTS.md` at the end.
 
 This PRD is built autonomously by agents; section 7.0 defines who decides what.
 
@@ -135,7 +135,7 @@ ghst daemon (Python, asyncio)
 | D1 | Keep the daemon in Python. | Latency is dominated by the network or model (300 to 1500 ms), not Python. The valuable code (`llm.py`, `prompts.py`, `safety.py`, `context.py`) already exists. |
 | D2 | Ship a small compiled PTY proxy, `ghst-pty`, as part of the baseline. | Output is what makes Next Command good, and the only terminal-independent way to get it is to sit between the terminal and the shell (what Warp gets for free and what Atuin's experimental proxy does). It must be compiled: it is in the path of every byte. Rust, built with the system cargo (fenix via Nix on Matt's machine; no rustup). |
 | D3 | ghst emits its own private OSC markers from zsh hooks; the proxy strips them. | Terminal-independent (does not rely on Ghostty's or any terminal's OSC 133 integration), carries a sequence number so output is matched to the right command, and the terminal never sees them. |
-| D4 | Render through ZLE only (`POSTDISPLAY` + `region_highlight`). | Works in every terminal. zsh-autosuggestions has done this for years. The `AGENTS.md` claim that POSTDISPLAY cannot be colored is about raw ANSI escapes; `region_highlight` is the supported way. Removes the `/dev/tty` drawing and its bug class. |
+| D4 | Render through ZLE only (`POSTDISPLAY` + `region_highlight`). | Works in every terminal. zsh-autosuggestions has done this for years. The v0.5 claim that POSTDISPLAY cannot be colored is about raw ANSI escapes; `region_highlight` is the supported way. Removes the `/dev/tty` drawing and its bug class. |
 | D5 | Optional integrations are sources, not dependencies. | `OutputSource` and `HistorySource` each have a default that needs nothing installed. Atuin and tmux are alternatives, used when present or configured. |
 | D6 | One LLM call per finished command. | Cost and rate limits stop mattering, so a stronger model and prompt caching are affordable. |
 | D7 | Shell and proxy talk a length-prefixed frame protocol over the daemon's socket. | zsh can build and parse it with parameter expansion only. Ends `python3` spawns per request (see `docs/REBUILD_PLAN.md` section 6, adopted here). |
@@ -164,6 +164,15 @@ At each `end` marker the proxy sends an `output` frame: `session` (the shell's P
 - Rust tooling: `cargo nextest run`, `cargo clippy -- -D warnings`, `cargo fmt --check`.
 - `/usr/bin/fm` exists on macOS 27 but needs a one-time `sudo fm license` (human).
 - Model aliases only, never dated snapshots.
+
+### 5.1 Lessons from v0.5 that still apply
+
+- **Quoting in `eval "$(ghst init zsh)"` output.** `$'\e[36m'` does not work inside a `"${param:-...}"` default when the code runs through `eval`. Assign defaults on their own line (`typeset -g VAR=$'\e[36m'`), then override from config. Any config value printed into shell code is quoted (`shlex.quote` on the Python side, `${(q)var}` on the zsh side).
+- **Never build code or data from user text by interpolation.** Buffers, history, and prompts go into frames as raw bytes with lengths (T04), never pasted into generated shell, Python, or JSON strings.
+- **Every blocking read in zsh has a timeout** (`zselect -t`, `sysread -t`, or a `zle -F` handler instead of a blocking read). A dead or hung daemon must never freeze the shell.
+- **Prompt escape sequences** set by ghst (if any) are wrapped in `%{...%}` so ZLE computes cursor positions correctly.
+- **Ctrl+G uses `recursive-edit`** for full line editing, not `read -r`. During that mode, suspend everything that reacts to keystrokes (ghst's prefix continuation, and zsh-autosuggestions via `autosuggest-disable`/`autosuggest-enable` when loaded), or the English text triggers suggestions.
+- **Stale responses arriving after a mode ends** used to fire `zle -R` and wipe the command Ctrl+G had just placed in `BUFFER`. With the persistent socket, cancel the in-flight `next` when entering a mode and drop any response whose `for` does not match the current request ID.
 
 ## 6. Risks
 
@@ -264,7 +273,7 @@ Each task below is written to be given to a subagent as-is. The agent gets this 
 Conventions for every task:
 
 - Work in an isolated git worktree on the task branch named in section 7.0. Commit there. Do not push, merge, or open PRs; the builder does that.
-- Read `AGENTS.md` and this PRD's sections 2, 4, and 5 before starting.
+- Read this PRD's sections 2, 4, 5 (including 5.1), and 7.0 before starting. There is no `AGENTS.md` on this branch until T20.
 - Python work is done only when `uv run pytest`, `uv run ruff check src/`, and `uv run basedpyright src/ghst/` all pass. Rust work is done only when `cargo nextest run`, `cargo clippy -- -D warnings`, and `cargo fmt --check` pass.
 - zsh files must pass `zsh -n`. Shell tests use the zpty harness from T13 once it exists, and run against **plain zsh first** (`zsh -f`, no plugins), then the plugin setup.
 - Do not edit `~/Developer/nix-darwin-config` or anything under `~/.config` that is a Nix store symlink. Use temporary config dirs (`XDG_CONFIG_HOME`, `ATUIN_CONFIG_DIR`, a temp `ZDOTDIR`) for experiments.
@@ -476,7 +485,7 @@ Shared files: within a wave, only one task edits a given file. `src/ghst/config.
 ### T16. Port Ctrl+G to the new transport
 
 - **Depends on:** T04, T13. **Parallel with:** T14.
-- **Read first:** `src/ghst/shell/nl-command.zsh` (`__ghst_nl_command`, `__ghst_nl_undo`, mode enter/exit), `AGENTS.md` notes on recursive-edit and FD cleanup.
+- **Read first:** `src/ghst/shell/nl-command.zsh` (`__ghst_nl_command`, `__ghst_nl_undo`, mode enter/exit), section 5.1 of this PRD.
 - **Do:** move NL to `src/ghst/shell/nl.zsh` using the persistent socket and frames (no `python3`, no `socat`). Keep recursive-edit and Ctrl+Z undo. Draw the spinner and status in `POSTDISPLAY` with `region_highlight`. Stop binding `^R`. Daemon side: `nl` gets the same session context as `next`, including the last command's output when shared.
 - **Done when:** zpty tests for generate, cancel with Esc, undo, daemon down; `rg 'python3|socat|/dev/tty' src/ghst/shell/nl.zsh` returns nothing.
 
@@ -505,7 +514,7 @@ Shared files: within a wave, only one task edits a given file. `src/ghst/config.
 ### T20. Docs
 
 - **Depends on:** T17.
-- **Do:** rewrite `README.md` around Next Command, leading with the plain-zsh install; a short "works with Atuin, tmux, zsh-autosuggestions" section; a privacy section (what is sent, when, redaction, local-only). Update `AGENTS.md` (architecture, file layout, IPC table, the proxy, and correct the POSTDISPLAY note). Update `config/default.toml`. Mark `docs/REBUILD_PLAN.md` and `docs/autocomplete-flow.md` as historical.
+- **Do:** rewrite `README.md` around Next Command, leading with the plain-zsh install; a short "works with Atuin, tmux, zsh-autosuggestions" section; a privacy section (what is sent, when, redaction, local-only). Write a new `AGENTS.md` for the new codebase (overview, architecture, file layout, IPC table, the proxy, development commands for Python and Rust, and the section 5.1 lessons), plus `CLAUDE.md` as a symlink to it. Update `config/default.toml`. Mark `docs/REBUILD_PLAN.md` and `docs/autocomplete-flow.md` as historical.
 - **Done when:** every command and config key in the docs exists in the code.
 
 ### T21. Dogfood week [human]
@@ -558,3 +567,4 @@ Each has an owner and a default, so none blocks the build.
 - 2026-11-24: first draft (Next Command for Ghostty with Atuin).
 - 2026-11-24: plain zsh in any terminal is the baseline; `ghst-pty` added.
 - 2026-11-24: autonomous build protocol (section 7.0), `[auto]`/`[human]` criteria, owners for open questions, T10 moved after T11, T22 added.
+- 2026-11-24: removed the v0.5 `AGENTS.md` from this branch; its still-valid lessons moved to section 5.1; T20 writes a new one.
