@@ -13,3 +13,10 @@ build/
 .env.*
 *.key
 *.pem
+
+# Rust
+target/
+
+# Local debug captures, terminal recordings, generated test files (never commit)
+.scratch/
+*.cast
