@@ -1,6 +1,6 @@
 # ghst rebuild plan
 
-Status: proposal
+Status: superseded by `docs/PRD.md` (2026-11-24). Kept for its wire protocol design (section 6) and history.
 Date: 2026-10-02
 Scope: a first-principles redesign of ghst, delivered in phases so that every phase ships something usable and the current Python version keeps working until the new one replaces it.
 
