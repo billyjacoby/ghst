@@ -662,8 +662,7 @@ def _cmd_login(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     config = GhstConfig.load()
-    config.provider.name = "chatgpt"
-    config.provider.api_base_url = ""
+    config.provider.name = "chatgpt"  # api_base_url is kept for switching back
     models = _probe_directly(config).get("models", [])
     if models:
         config.provider.autocomplete_model = _choose_model(
