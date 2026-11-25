@@ -72,7 +72,7 @@ __ghst_cleanup_autocomplete() {
     __ghst_cancel_debounce 2>/dev/null
     if [[ -n "$__GHST_RESPONSE_FD" ]]; then
         zle -F $__GHST_RESPONSE_FD 2>/dev/null
-        exec {__GHST_RESPONSE_FD}<&- 2>/dev/null
+        { exec {__GHST_RESPONSE_FD}<&- } 2>/dev/null
         __GHST_RESPONSE_FD=""
     fi
     __GHST_SUGGESTION=""

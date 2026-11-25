@@ -92,7 +92,7 @@ __ghst_send_request() {
     # Close any previous in-flight request
     if [[ -n "$__GHST_RESPONSE_FD" ]]; then
         zle -F $__GHST_RESPONSE_FD 2>/dev/null
-        exec {__GHST_RESPONSE_FD}<&- 2>/dev/null
+        { exec {__GHST_RESPONSE_FD}<&- } 2>/dev/null
         __GHST_RESPONSE_FD=""
     fi
 
@@ -116,7 +116,7 @@ __ghst_on_response() {
     local response=""
     if ! read -r -u $fd response 2>/dev/null; then
         zle -F $fd
-        exec {fd}<&- 2>/dev/null
+        { exec {fd}<&- } 2>/dev/null
         __GHST_RESPONSE_FD=""
         return
     fi
@@ -124,7 +124,7 @@ __ghst_on_response() {
     # A "partial" line is the instant history match; the model's answer follows
     if [[ "$response" != *'"partial": true'* ]]; then
         zle -F $fd
-        exec {fd}<&- 2>/dev/null
+        { exec {fd}<&- } 2>/dev/null
         __GHST_RESPONSE_FD=""
     fi
 
@@ -220,7 +220,7 @@ __ghst_debounce_fired() {
 __ghst_cancel_debounce() {
     if [[ -n "$__GHST_TIMER_FD" ]]; then
         zle -F $__GHST_TIMER_FD 2>/dev/null
-        exec {__GHST_TIMER_FD}<&- 2>/dev/null
+        { exec {__GHST_TIMER_FD}<&- } 2>/dev/null
         __GHST_TIMER_FD=""
     fi
 }
@@ -255,7 +255,7 @@ __ghst_accept_word() {
         __ghst_cancel_debounce
         if [[ -n "$__GHST_RESPONSE_FD" ]]; then
             zle -F $__GHST_RESPONSE_FD 2>/dev/null
-            exec {__GHST_RESPONSE_FD}<&- 2>/dev/null
+            { exec {__GHST_RESPONSE_FD}<&- } 2>/dev/null
             __GHST_RESPONSE_FD=""
         fi
         local first_word="${__GHST_SUGGESTION%% *}"
@@ -321,7 +321,7 @@ __ghst_line_finish() {
     __ghst_cancel_debounce
     if [[ -n "$__GHST_RESPONSE_FD" ]]; then
         zle -F $__GHST_RESPONSE_FD 2>/dev/null
-        exec {__GHST_RESPONSE_FD}<&- 2>/dev/null
+        { exec {__GHST_RESPONSE_FD}<&- } 2>/dev/null
         __GHST_RESPONSE_FD=""
     fi
     zle .accept-line

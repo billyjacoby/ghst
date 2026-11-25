@@ -115,7 +115,7 @@ else
         rm -f "$__GHST_SOCKET" 2>/dev/null
         ghst start --quiet &>/dev/null &!
     else
-        exec {{REPLY}}<&- 2>/dev/null
+        {{ exec {{REPLY}}<&- }} 2>/dev/null  # bare exec 2>... would redirect the shell
     fi
 fi
 ''')
