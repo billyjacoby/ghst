@@ -30,7 +30,8 @@ src/ghst/
   cli.py         – CLI commands (shell-init, start, stop, status, init, model, provider, etc.)
   config.py      – ~/.config/ghst/config.toml parsing, defaults, env var override
   daemon.py      – asyncio socket server, request routing, session buffer, rate limiting, idle timeout
-  llm.py         – async LLM client (OpenAI + Anthropic), circuit breaker, caching, prompt caching
+  llm.py         – async LLM client (OpenAI, Anthropic, ChatGPT plan), circuit breaker, caching
+  chatgpt.py     – Sign in with ChatGPT: loopback OAuth + PKCE, token refresh, Responses API streaming
   prompts.py     – system/user prompt templates for all request types
   context.py     – cwd/git/env/project-type context gathering & caching
   safety.py      – dangerous-command detection, history/output sanitization
@@ -117,4 +118,5 @@ uv run ghst status            # check daemon status
 - **Never interpolate user data into Python strings** — shell history, user input, and buffer contents must be piped through stdin to `python3` for JSON encoding, or escaped with `__ghst_json_str` (autocomplete builds its requests this way to avoid a subprocess per keystroke). Send with `print -r`: plain `print` rewrites backslashes and breaks the JSON. Direct interpolation into triple-quoted strings (`'''$var'''`) breaks on quotes, backslashes, and special characters, producing invalid JSON.
 - **IPC timeouts** — `__ghst_request` must have a timeout (socat `-T`, python `settimeout`). Without it, socat hangs forever on stale sockets from crashed daemons, freezing the shell.
 - **Ctrl+Z undo** — reverts NL-generated commands back to the original buffer
+- **ChatGPT plan provider** — `provider.name = "chatgpt"` follows OpenAI's open-source SIWC flow: register with `client_id=dynamic_agent_client` on first sign-in, then reuse the issued client ID; redirect to `http://127.0.0.1:1455/auth/callback`; verify the ID token (RS256, done with integer math to avoid a crypto dependency); refresh tokens rotate, so refreshes are serialized. Inference must use `POST /v1/responses` with `store: false, stream: true`, and rejects `temperature` and `max_output_tokens`, so ghost text is capped by closing the stream at the first newline.
 - **Model aliases over dated snapshots** — always use short model aliases (e.g. `claude-sonnet-4-5`, `claude-haiku-4-5`, `gpt-4o`) instead of dated snapshot names

@@ -424,7 +424,11 @@ class GhstDaemon:
 
     async def _handle_health(self) -> dict[str, Any]:
         probe = await self.llm.probe()
-        return {"type": "health", **probe, "circuit": self.llm.health.status_display()}
+        return {
+            "type": "health", **probe,
+            "circuit": self.llm.health.status_display(),
+            "last_error": self.llm.last_error,
+        }
 
     def _handle_reload_config(self) -> dict[str, Any]:
         """Reload configuration from disk."""

@@ -279,6 +279,13 @@ def _probe_directly(config: GhstConfig) -> dict:
 def _print_health(health: dict, config: GhstConfig) -> None:
     """Print whether the LLM server is usable."""
     url = health.get("url", config.provider.effective_api_base_url)
+    if config.provider.name == "chatgpt":
+        from ghst.chatgpt import USAGE_URL
+
+        account = health.get("account") or "not signed in"
+        print(f"  account:    {account}")
+        if health.get("plan"):
+            print(f"  billing:    Using ChatGPT plan (Manage usage: {USAGE_URL})")
     if health.get("ok"):
         print(f"  server:     ok ({url}, {health.get('latency_ms', '?')}ms)")
     else:
@@ -291,6 +298,8 @@ def _print_health(health: dict, config: GhstConfig) -> None:
             f"  paused:     after {circuit.get('consecutive_failures', 0)} failed requests;"
             f" retrying in {circuit.get('probe_in_seconds', 0)}s"
         )
+    if health.get("last_error"):
+        print(f"  last error: {health['last_error']}")
 
 
 # ── Init wizard ──────────────────────────────────────────────────────────────
@@ -531,6 +540,18 @@ def _cmd_model(args: argparse.Namespace) -> None:
     print(f"  nl-commands:  {nl} ({name})")
 
 
+def _cmd_model_list(args: argparse.Namespace) -> None:
+    """Handle `ghst model list`."""
+    config = GhstConfig.load()
+    health = _probe_directly(config)
+    if not health.get("ok"):
+        print(f"  ghst: {health.get('error', 'could not reach the server')}", file=sys.stderr)
+        sys.exit(1)
+    current = {config.provider.effective_autocomplete_model, config.provider.model}
+    for model in health.get("models", []):
+        print(f"  {'*' if model in current else ' '} {model}")
+
+
 def _cmd_model_set(args: argparse.Namespace) -> None:
     """Handle `ghst model set <model>`."""
     config = GhstConfig.load()
@@ -568,9 +589,13 @@ def _cmd_provider_set(args: argparse.Namespace) -> None:
     config = GhstConfig.load()
     name = args.name
 
-    if name not in ("openai", "anthropic"):
-        print(f"  ghst: unknown provider '{name}' (use 'openai' or 'anthropic')")
+    if name not in ("openai", "anthropic", "chatgpt"):
+        print(f"  ghst: unknown provider '{name}' (use 'openai', 'anthropic' or 'chatgpt')")
         sys.exit(1)
+
+    if name == "chatgpt":
+        print("  Run `ghst login` to sign in with ChatGPT; it switches the provider for you.")
+        return
 
     config.provider.name = name
 
@@ -598,6 +623,91 @@ def _cmd_provider_set(args: argparse.Namespace) -> None:
     print(f"  ✓ provider → {name}")
 
 
+# ── ChatGPT sign-in ──────────────────────────────────────────────────────────
+
+def _choose_model(models: list[str], current: str, label: str, prefer_small: bool) -> str:
+    """Pick a model from the list, asking when the terminal is interactive."""
+    if current in models:
+        default = current
+    else:
+        small = [m for m in models if any(t in m for t in ("nano", "mini", "spark", "flash"))]
+        default = (small or models)[0] if prefer_small else models[0]
+    if not sys.stdin.isatty():
+        return default
+    print(f"\n  Model for {label}:")
+    for i, model in enumerate(models, 1):
+        print(f"    {i}. {model}{'  (default)' if model == default else ''}")
+    answer = input("  Number or name [default]: ").strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(models):
+        return models[int(answer) - 1]
+    return answer or default
+
+
+def _cmd_login(args: argparse.Namespace) -> None:
+    """Handle `ghst login`: sign in with ChatGPT and use the plan for requests."""
+    from ghst import chatgpt
+
+    try:
+        record = chatgpt.login(new_account=args.new_account, open_browser=not args.no_browser)
+    except chatgpt.ChatGPTError as e:
+        print(f"  ✗ {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"  ✓ Signed in to ChatGPT as {record.get('email') or record['subject']}")
+    if not chatgpt.plan_enabled(record):
+        print(
+            "  ⚠ ChatGPT plan usage isn't enabled for this sign-in, so ghst can't use it.\n"
+            "    It needs an eligible plan (Plus or Pro) and permission to use it in ghst.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    config = GhstConfig.load()
+    config.provider.name = "chatgpt"
+    config.provider.api_base_url = ""
+    models = _probe_directly(config).get("models", [])
+    if models:
+        config.provider.autocomplete_model = _choose_model(
+            models, config.provider.autocomplete_model, "ghost text (pick the fastest)", True
+        )
+        config.provider.model = _choose_model(
+            models, config.provider.model, "Ctrl+G commands", False
+        )
+    else:
+        print("  ⚠ Could not list ChatGPT models; set them with `ghst model set`.")
+    config.write_toml()
+    _send_reload(config)
+
+    if chatgpt.mark_welcomed():
+        print(
+            "\n  You're using your ChatGPT plan\n"
+            "  Eligible usage in ghst uses your ChatGPT plan. Manage usage in your\n"
+            f"  ChatGPT settings: {chatgpt.USAGE_URL}\n"
+        )
+        if sys.stdin.isatty():
+            input("  Press Enter to continue (Got it) ")
+    print(f"  ✓ Using ChatGPT plan (Manage usage: {chatgpt.USAGE_URL})")
+    print(f"    ghost text: {config.provider.effective_autocomplete_model}")
+    print(f"    Ctrl+G:     {config.provider.model}")
+
+
+def _cmd_logout(args: argparse.Namespace) -> None:
+    """Handle `ghst logout`."""
+    from ghst import chatgpt
+
+    record, revoked = chatgpt.logout()
+    if not record:
+        print("  Not signed in to ChatGPT.")
+        return
+    _send_reload(GhstConfig.load())
+    if revoked:
+        print("  ✓ Signed out of ChatGPT")
+    else:
+        print(
+            "  ⚠ Removed the ChatGPT tokens from this machine, but OpenAI didn't confirm\n"
+            "    the sign-out. Disconnect ghst in ChatGPT settings to be sure."
+        )
+
+
 # ── Help command ─────────────────────────────────────────────────────────────
 
 HELP_TEXT = """\
@@ -615,6 +725,7 @@ HELP_TEXT = """\
     ghst status               Daemon health, provider, models, uptime
     ghst model [set]          Show or change models
     ghst provider [set]       Show or change LLM provider
+    ghst login | logout       Sign in with ChatGPT to use your ChatGPT plan
     ghst set <key> <value>    Change a config value
     ghst get <key>            Show a config value
     ghst reset <key>          Reset a config key to default
@@ -723,14 +834,26 @@ def main(argv: list[str] | None = None) -> None:
         "--nl", action="store_true", help="Set NL command model only"
     )
     sp_model_set.set_defaults(func=_cmd_model_set)
+    sp_model_list = model_sub.add_parser("list", help="List the server's models")
+    sp_model_list.set_defaults(func=_cmd_model_list)
 
     # provider
     sp_provider = subparsers.add_parser("provider", help="Show or change provider")
     sp_provider.set_defaults(func=_cmd_provider)
     provider_sub = sp_provider.add_subparsers(dest="provider_command")
     sp_provider_set = provider_sub.add_parser("set", help="Set provider")
-    sp_provider_set.add_argument("name", help="Provider name (openai, anthropic)")
+    sp_provider_set.add_argument("name", help="Provider name (openai, anthropic, chatgpt)")
     sp_provider_set.set_defaults(func=_cmd_provider_set)
+
+    # login / logout
+    sp = subparsers.add_parser("login", help="Sign in with ChatGPT")
+    sp.add_argument(
+        "--new-account", action="store_true", help="Sign in to a different ChatGPT account"
+    )
+    sp.add_argument("--no-browser", action="store_true", help="Print the sign-in URL instead")
+    sp.set_defaults(func=_cmd_login)
+    sp = subparsers.add_parser("logout", help="Sign out of ChatGPT")
+    sp.set_defaults(func=_cmd_logout)
 
     # set
     sp = subparsers.add_parser("set", help="Set a config value")

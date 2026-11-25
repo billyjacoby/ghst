@@ -1,7 +1,7 @@
 """Async LLM client for ghst.
 
-Supports OpenAI and Anthropic APIs with circuit breaker, caching,
-connection pooling, and per-request-type timeouts.
+Supports OpenAI, Anthropic and ChatGPT-plan (Sign in with ChatGPT) APIs with
+circuit breaker, caching, connection pooling, and per-request-type timeouts.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from ghst import chatgpt
 from ghst.config import GhstConfig
 
 logger = logging.getLogger("ghst.llm")
@@ -159,6 +160,8 @@ class LLMClient:
         self.config = config
         self.health = ConnectionHealth()
         self.cache = ResponseCache()
+        self.chatgpt = chatgpt.ChatGPTSession()
+        self.last_error = ""
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -175,6 +178,9 @@ class LLMClient:
 
     def _is_anthropic(self) -> bool:
         return self.config.provider.name == "anthropic"
+
+    def _is_chatgpt(self) -> bool:
+        return self.config.provider.name == "chatgpt"
 
     async def complete(
         self,
@@ -212,19 +218,28 @@ class LLMClient:
         try:
             if self._is_anthropic():
                 result = await self._complete_anthropic(messages, model, timeout, single_line)
+            elif self._is_chatgpt():
+                result = await self._complete_chatgpt(messages, model, timeout, single_line)
             else:
                 result = await self._complete_openai(messages, model, timeout, single_line)
 
             latency_ms = (time.monotonic() - start) * 1000
             self.health.record_success(latency_ms)
+            self.last_error = ""
 
             if use_cache_key and result:
                 self.cache.set(result, *use_cache_key)
 
             return result
 
+        except chatgpt.ChatGPTError as e:
+            self.health.record_failure()
+            self.last_error = str(e)
+            logger.info("ChatGPT request failed: %s", e)
+            return ""
         except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as e:
             self.health.record_failure()
+            self.last_error = str(e) or type(e).__name__
             logger.debug("LLM request failed: %s", e)
             return ""
         except Exception:
@@ -308,10 +323,38 @@ class LLMClient:
         data = response.json()
         return data["content"][0]["text"].strip()
 
+    async def _complete_chatgpt(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        timeout: httpx.Timeout,
+        single_line: bool = False,
+    ) -> str:
+        # The plan flow rejects max_output_tokens and temperature, so ghost
+        # text is capped by closing the stream instead
+        client = await self._get_client()
+        body = chatgpt.responses_body(messages, model)
+        max_chars = self.config.ui.autocomplete_max_tokens * 4 if single_line else 0
+        token = await self.chatgpt.access_token(client)
+        try:
+            text = await chatgpt.stream_response(
+                client, token, body, timeout, single_line=single_line, max_chars=max_chars,
+            )
+        except chatgpt.ChatGPTError as e:
+            if e.status != 401:
+                raise
+            token = await self.chatgpt.access_token(client, force_refresh=True)
+            text = await chatgpt.stream_response(
+                client, token, body, timeout, single_line=single_line, max_chars=max_chars,
+            )
+        return text.strip()
+
     async def probe(self) -> dict[str, Any]:
         """Check that the LLM server answers and lists the configured models."""
         provider = self.config.provider
         base_url = provider.effective_api_base_url.rstrip("/")
+        if self._is_chatgpt():
+            return await self._probe_chatgpt()
         if self._is_anthropic():
             url = f"{base_url}/v1/models"
             headers = {"x-api-key": provider.api_key, "anthropic-version": "2023-06-01"}
@@ -344,13 +387,49 @@ class LLMClient:
 
         result["ok"] = True
         try:
-            listed = {m.get("id") for m in response.json().get("data", [])}
+            models = [m.get("id") for m in response.json().get("data", [])]
         except (ValueError, AttributeError, TypeError):
-            listed = set()
-        if listed:
+            models = []
+        return self._with_models(result, models)
+
+    def _with_models(self, result: dict[str, Any], models: list[str]) -> dict[str, Any]:
+        result["models"] = models
+        if models:
+            provider = self.config.provider
             wanted = dict.fromkeys([provider.effective_autocomplete_model, provider.model])
-            result["unlisted_models"] = [m for m in wanted if m not in listed]
+            result["unlisted_models"] = [m for m in wanted if m not in models]
         return result
+
+    async def _probe_chatgpt(self) -> dict[str, Any]:
+        record = self.chatgpt.record() or {}
+        result: dict[str, Any] = {
+            "ok": False, "url": chatgpt.API_BASE, "account": record.get("email", ""),
+        }
+        client = await self._get_client()
+        start = time.monotonic()
+        try:
+            token = await self.chatgpt.access_token(client)
+            response = await client.get(
+                f"{chatgpt.API_BASE}/models", timeout=httpx.Timeout(5.0),
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except chatgpt.ChatGPTError as e:
+            result["error"] = str(e)
+            return result
+        except httpx.HTTPError as e:
+            result["error"] = str(e) or type(e).__name__
+            return result
+        result["latency_ms"] = round((time.monotonic() - start) * 1000)
+        if response.status_code >= 400:
+            result["error"] = str(chatgpt.plan_error(response.status_code, response.content))
+            return result
+        result["ok"] = True
+        result["plan"] = True
+        try:
+            models = chatgpt.list_models_from(response.json())
+        except ValueError:
+            models = []
+        return self._with_models(result, models)
 
     async def complete_with_retry(
         self,

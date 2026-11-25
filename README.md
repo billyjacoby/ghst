@@ -117,6 +117,23 @@ error_color = "#f85149"                 # Error indicator (✗)
 
 See `config/default.toml` for all available settings.
 
+### Use your ChatGPT plan (Sign in with ChatGPT)
+
+Instead of an API key, ghst can run on your ChatGPT Plus or Pro plan:
+
+```bash
+ghst login            # Continue with ChatGPT in the browser, then pick models
+ghst status           # account, "Using ChatGPT plan", server check
+ghst model list       # models your plan offers
+ghst logout           # revoke and remove the tokens
+```
+
+ghst uses OpenAI's [open-source plan usage flow](https://developers.openai.com/siwc/token-sharing-open-source):
+requests count against your plan's shared allowance, and you can see or cap ghst's
+usage at [ChatGPT settings → Usage](https://chatgpt.com/settings/usage). Tokens are
+stored in `~/.config/ghst/chatgpt.json` (owner-only). When the allowance runs out,
+requests stop; ghst never switches to paid API billing.
+
 ## CLI Commands
 
 | Command | Description |
