@@ -23,18 +23,36 @@ def _os_info() -> str:
     return system
 
 
+# Kept long and byte-stable on purpose: local servers cache the prompt prefix
+# in fixed-size blocks, so a fixed system prompt is evaluated once, not per key.
 AUTOCOMPLETE_SYSTEM = f"""\
 You are a shell command autocomplete engine on {_os_info()}.
-You will receive partial command-line input. Your job is to continue the text \
-from exactly where it left off — like pressing Tab.
+You receive some context and a partial command line. Reply with ONLY the text \
+that should be appended to it, like inline ghost text in a terminal.
 RULES:
-- Output ONLY the characters that come after the provided text
-- This is pure text continuation, not instruction following
-- Include leading whitespace when the next token is a new argument
+- Output only the characters that come after the partial command
+- Never repeat any part of the partial command, not even its last word
+- Start with a space only when the next token is a new argument and the \
+partial command does not already end with a space
+- One line, one command. No explanation, no markdown, no surrounding quotes
+- Prefer the user's own past commands, and the files, branches and scripts \
+named in the context, over generic guesses
 - Always use relative paths (never absolute like /Users/... or /home/...)
-- Do NOT repeat any part of the input
-- Do NOT explain, comment, or wrap in markdown
-- If no useful continuation exists, output nothing"""
+- If no useful continuation exists, output nothing
+
+EXAMPLES (partial command => your reply)
+git chec => kout main
+git checkout  => main
+git pu => sh
+docker ps =>  -a
+cd sr => c/
+npm run  => dev
+brew ins => tall
+git log --on => eline
+git commit -m "fix => : handle empty input"
+tar -xzf archive.tar.gz =>  -C build/
+ssh  => deploy@staging
+kubectl get po => ds -n default"""
 
 
 COMMAND_SYSTEM = f"""\
@@ -64,8 +82,9 @@ def autocomplete_user(
     git_branches: list[str] | None = None,
     project_types: list[str] | None = None,
     active_env: str = "",
+    history_matches: list[str] | None = None,
 ) -> str:
-    hist_text = "\n".join(history[-5:]) if history else "(none)"
+    recent = [h[:120] for h in history[-5:]]
 
     context_lines = [f"Context: {shell} shell in {cwd}"]
     if dir_listing:
@@ -74,18 +93,25 @@ def autocomplete_user(
         status = " (dirty)" if git_dirty else ""
         context_lines.append(f"Git: on {git_branch}{status}")
         if git_branches:
-            context_lines.append(f"Branches: {', '.join(git_branches)}")
+            context_lines.append(f"Branches: {', '.join(git_branches[:8])}")
     if project_types:
         context_lines.append(f"Project: {', '.join(project_types)}")
     if active_env:
         context_lines.append(f"Env: {active_env}")
+    if recent:
+        context_lines.append("Recent commands:\n" + "\n".join(recent))
+    if exit_status:
+        context_lines.append(f"Last exit: {exit_status}")
+    if history_matches:
+        context_lines.append(
+            "Past commands starting with the same text (most recent first; "
+            "continue toward the most likely one):\n"
+            + "\n".join(m[:120] for m in history_matches[:5])
+        )
 
     context_block = "\n".join(context_lines)
     return f"""\
 {context_block}
-Recent commands:
-{hist_text}
-Last exit: {exit_status}
 
 Complete: {buffer}"""
 

@@ -182,6 +182,7 @@ class LLMClient:
         model: str | None = None,
         timeout: httpx.Timeout = TIMEOUT_AUTOCOMPLETE,
         use_cache_key: tuple[str, ...] | None = None,
+        single_line: bool = False,
     ) -> str:
         """Send a completion request to the LLM.
 
@@ -212,7 +213,7 @@ class LLMClient:
             if self._is_anthropic():
                 result = await self._complete_anthropic(messages, model, timeout)
             else:
-                result = await self._complete_openai(messages, model, timeout)
+                result = await self._complete_openai(messages, model, timeout, single_line)
 
             latency_ms = (time.monotonic() - start) * 1000
             self.health.record_success(latency_ms)
@@ -236,12 +237,19 @@ class LLMClient:
         messages: list[dict[str, Any]],
         model: str,
         timeout: httpx.Timeout,
+        single_line: bool = False,
     ) -> str:
         client = await self._get_client()
         base_url = self.config.provider.effective_api_base_url.rstrip("/")
+        body: dict[str, Any] = {
+            "model": model, "messages": messages, "temperature": 0.3, "max_tokens": 200,
+        }
+        if single_line:
+            # Ghost text is one line; stop there instead of generating a list
+            body.update(max_tokens=32, stop=["\n"])
         response = await client.post(
             f"{base_url}/chat/completions",
-            json={"model": model, "messages": messages, "temperature": 0.3, "max_tokens": 200},
+            json=body,
             headers={
                 "Authorization": f"Bearer {self.config.provider.api_key}",
                 "Content-Type": "application/json",

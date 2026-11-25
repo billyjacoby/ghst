@@ -27,7 +27,7 @@ class TestAutocomplete:
 
     def test_user_prompt_empty_history(self) -> None:
         prompt = autocomplete_user(buffer="ls", cwd="/tmp", history=[])
-        assert "(none)" in prompt
+        assert "Recent commands" not in prompt
 
     def test_history_limited_to_5(self) -> None:
         history = [f"cmd{i}" for i in range(20)]

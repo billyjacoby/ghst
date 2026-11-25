@@ -6,6 +6,7 @@ typeset -g __GHST_SUGGESTION=""
 typeset -g __GHST_TIMER_FD=""
 typeset -g __GHST_LAST_BUFFER=""
 typeset -g __GHST_PENDING_BUFFER=""
+typeset -g __GHST_REQ_BUFFER=""
 typeset -gi __GHST_PENDING_CURSOR=0
 typeset -gi __GHST_GHOST_VISIBLE=0
 typeset -g __GHST_RESPONSE_FD=""
@@ -44,31 +45,35 @@ __ghst_clear_suggestion() {
     __GHST_LAST_BUFFER=""
 }
 
+# ── JSON-escape $1 into REPLY ────────────────────────────────────────────────
+__ghst_json_str() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\t'/\\t}"
+    s="${s//[[:cntrl:]]/}"
+    REPLY="\"$s\""
+}
+
 # ── Send async request to daemon ─────────────────────────────────────────────
 __ghst_send_request() {
     local buffer="$1" cursor_pos="$2"
 
     [[ -S "$__GHST_SOCKET" ]] || return 1
 
-    # Build entire JSON request in a single python3 call
-    # Pass buffer via env var to avoid shell quoting issues
-    local json_req
-    json_req=$(__GHST_BUF="$buffer" __GHST_CWD="$PWD" python3 -c "
-import json, os, sys
-hist = [h for h in sys.stdin.read().splitlines() if h]
-print(json.dumps({
-    'type': 'complete',
-    'request_id': 'ac-$RANDOM',
-    'buffer': os.environ['__GHST_BUF'],
-    'cursor_pos': $cursor_pos,
-    'cwd': os.environ['__GHST_CWD'],
-    'shell': 'zsh',
-    'history': hist,
-    'exit_status': ${__GHST_LAST_EXIT:-0},
-}))
-" < <(fc -l -5 -1 2>/dev/null | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//') 2>/dev/null)
-
-    [[ -z "$json_req" ]] && return 1
+    # Build the JSON request in pure zsh (no subprocess per request)
+    local -a hist parts
+    local h REPLY
+    hist=("${(@f)$(fc -ln -5 -1 2>/dev/null)}")
+    for h in "${hist[@]}"; do
+        [[ -n "$h" ]] || continue
+        __ghst_json_str "$h"; parts+=("$REPLY")
+    done
+    __ghst_json_str "$buffer"; local buf_json="$REPLY"
+    __ghst_json_str "$PWD"; local cwd_json="$REPLY"
+    local json_req="{\"type\":\"complete\",\"request_id\":\"ac-$RANDOM\",\"buffer\":$buf_json,\"cursor_pos\":$cursor_pos,\"cwd\":$cwd_json,\"shell\":\"zsh\",\"history\":[${(j:,:)parts}],\"exit_status\":${__GHST_LAST_EXIT:-0},\"stream_history\":true}"
+    __GHST_REQ_BUFFER="$buffer"
 
     # Close any previous in-flight request
     if [[ -n "$__GHST_RESPONSE_FD" ]]; then
@@ -84,10 +89,10 @@ print(json.dumps({
     fi
     __GHST_RESPONSE_FD=$REPLY
 
-    print -u $__GHST_RESPONSE_FD "$json_req"
+    print -r -u $__GHST_RESPONSE_FD -- "$json_req"
 
-    # Watch for response
-    zle -F $__GHST_RESPONSE_FD __ghst_on_response
+    # Watch for response (as a widget, so BUFFER is readable in the handler)
+    zle -F -w $__GHST_RESPONSE_FD __ghst_on_response
 }
 
 # ── Handle async response ────────────────────────────────────────────────────
@@ -102,17 +107,22 @@ __ghst_on_response() {
         return
     fi
 
-    zle -F $fd
-    exec {fd}<&- 2>/dev/null
-    __GHST_RESPONSE_FD=""
+    # A "partial" line is the instant history match; the model's answer follows
+    if [[ "$response" != *'"partial": true'* ]]; then
+        zle -F $fd
+        exec {fd}<&- 2>/dev/null
+        __GHST_RESPONSE_FD=""
+    fi
 
-    # Extract suggestion (pure shell)
+    # Extract suggestion (pure shell). It is always the last field.
     local suggestion=""
     if [[ "$response" == *'"suggestion": "'* ]]; then
         suggestion="${response#*\"suggestion\": \"}"
-        suggestion="${suggestion%%\"*}"
+        suggestion="${suggestion%\"\}}"
+        suggestion="${suggestion//\\\\/$'\x01'}"
+        suggestion="${suggestion//\\\"/\"}"
         suggestion="${suggestion//\\n/$'\n'}"
-        suggestion="${suggestion//\\\\/\\}"
+        suggestion="${suggestion//$'\x01'/\\}"
     fi
 
     [[ -z "$suggestion" ]] && return
@@ -126,8 +136,18 @@ __ghst_on_response() {
     [[ "$suggestion" == *"I "* ]] && return
     [[ "$suggestion" == *"Sorry"* ]] && return
 
+    # The user may have typed on since the request was sent: keep only the
+    # part of the answer that still continues what is on the line now.
+    (( CURSOR == ${#BUFFER} )) || return
+    [[ "${BUFFER:0:${#__GHST_REQ_BUFFER}}" == "$__GHST_REQ_BUFFER" ]] || return
+    local extra="${BUFFER:${#__GHST_REQ_BUFFER}}"
+    [[ "${suggestion:0:${#extra}}" == "$extra" ]] || return
+    suggestion="${suggestion:${#extra}}"
+    [[ -z "$suggestion" || "$suggestion" == "$__GHST_SUGGESTION" ]] && return
+
+    __ghst_erase_ghost
     __GHST_SUGGESTION="$suggestion"
-    __GHST_LAST_BUFFER="$__GHST_PENDING_BUFFER"
+    __GHST_LAST_BUFFER="$BUFFER"
     zle -R
     __ghst_draw_ghost
 }
@@ -209,6 +229,8 @@ __ghst_dismiss() {
         __ghst_clear_suggestion
         __ghst_cancel_debounce
     fi
+    # In vi mode Esc must still leave insert mode
+    [[ "$KEYMAP" == (main|viins) && "$(bindkey -lL main)" == *viins* ]] && zle vi-cmd-mode
 }
 
 # ── Accept one word (Shift+→) ───────────────────────────────────────────────
@@ -249,6 +271,21 @@ __ghst_tab_accept() {
 
 # ── Self-insert ──────────────────────────────────────────────────────────────
 __ghst_self_insert() {
+    # Typing the suggested text keeps the rest of the suggestion on screen
+    if [[ -n "$__GHST_SUGGESTION" && "$KEYS" == "${__GHST_SUGGESTION[1]}" ]] \
+        && (( CURSOR == ${#BUFFER} )); then
+        zle .self-insert
+        __GHST_SUGGESTION="${__GHST_SUGGESTION:1}"
+        __GHST_LAST_BUFFER="$BUFFER"
+        if [[ -n "$__GHST_SUGGESTION" ]]; then
+            zle -R
+            __ghst_draw_ghost
+        else
+            __GHST_GHOST_VISIBLE=0
+            __ghst_schedule_complete
+        fi
+        return
+    fi
     __ghst_clear_suggestion
     zle .self-insert
     __ghst_schedule_complete
@@ -283,11 +320,13 @@ zle -N __ghst_accept_word
 zle -N __ghst_tab_accept
 zle -N __ghst_line_finish
 zle -N __ghst_dismiss
+zle -N __ghst_on_response
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
 bindkey -M main -R ' '-'~' __ghst_self_insert   # All printable chars
 bindkey '^?' __ghst_backward_delete              # Backspace
 bindkey '^[[C' __ghst_accept_suggestion          # Right arrow — accept full
+bindkey '^[OC' __ghst_accept_suggestion          # Right arrow (application mode)
 bindkey '^[[1;2C' __ghst_accept_word             # Shift+Right — accept word
 bindkey '\t' __ghst_tab_accept                   # Tab
 bindkey '^M' __ghst_line_finish                  # Enter

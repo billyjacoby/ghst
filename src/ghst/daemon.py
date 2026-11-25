@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import time
 from collections import deque
@@ -37,7 +38,7 @@ from ghst.safety import check_dangerous, sanitize_history, sanitize_output
 
 logger = logging.getLogger("ghst")
 
-RATE_LIMIT_RPM = 60  # max requests per minute to LLM
+RATE_LIMIT_RPM = 240  # max requests per minute to LLM
 
 
 class RateLimiter:
@@ -112,6 +113,49 @@ def _ensure_leading_space(buffer: str, suggestion: str) -> str:
 
 
 _FENCE_RE: re.Pattern[str] | None = None
+
+
+
+def _strip_echo(buffer: str, suggestion: str) -> str:
+    """Drop text the model repeated from the buffer (small models do this)."""
+    typed = buffer.rstrip()
+    if typed and suggestion.startswith(typed):
+        rest = suggestion[len(typed):]
+        return rest.lstrip() if buffer != typed else rest
+    if buffer and not buffer[-1].isspace():
+        token = buffer.split()[-1]
+        if token != buffer and suggestion.startswith(token):
+            return suggestion[len(token):]
+    return suggestion
+
+
+async def _atuin_matches(buffer: str, cwd: str, limit: int = 8) -> list[str]:
+    """Past commands from atuin that start with the buffer, this directory first."""
+    atuin = shutil.which("atuin")
+    if not atuin or not buffer.strip():
+        return []
+    env = {**os.environ, "ATUIN_SESSION": os.environ.get("ATUIN_SESSION", "ghst")}
+
+    async def search(*extra: str) -> list[str]:
+        proc = await asyncio.create_subprocess_exec(
+            atuin, "search", "--search-mode", "prefix", "--filter-mode", "global",
+            "--limit", "20", "--cmd-only", "--print0", *extra, "--", buffer,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=0.5)
+        # atuin prints oldest first
+        return out.decode(errors="replace").split("\0")[::-1]
+
+    try:
+        here, everywhere = await asyncio.gather(search("--cwd", cwd), search())
+    except (asyncio.TimeoutError, OSError):
+        return []
+    matches: list[str] = []
+    for cmd in here + everywhere:
+        cmd = cmd.strip()
+        if cmd and "\n" not in cmd and cmd != buffer.strip() and cmd not in matches:
+            matches.append(cmd[:200])
+    return matches[:limit]
 
 
 def _strip_code_fences(text: str) -> str:
@@ -219,25 +263,31 @@ class GhstDaemon:
             # Regular autocomplete
             exit_status = data.get("exit_status", 0)
             ctx = self.context.gather(cwd, shell)
+            raw_matches = data.get("_history_matches")
+            if raw_matches is None:
+                raw_matches = await _atuin_matches(buffer, cwd)
+            history_matches = sanitize_history(raw_matches)
             messages = [
                 {"role": "system", "content": autocomplete_system()},
                 {"role": "user", "content": autocomplete_user(
                     buffer=buffer, cwd=cwd, history=history, shell=shell,
                     exit_status=exit_status,
-                    dir_listing=ctx.dir_listing(cwd),
+                    dir_listing=ctx.dir_listing(cwd, max_entries=20),
                     git_branch=ctx.git_branch,
                     git_dirty=ctx.git_dirty,
                     git_branches=ctx.git_branches,
                     project_types=ctx.project_types,
                     active_env=ContextInfo.active_env(),
+                    history_matches=history_matches,
                 )},
             ]
             cache_key = ("autocomplete", buffer, cwd)
             model = self.config.provider.effective_autocomplete_model
             suggestion = await self.llm.complete(
                 messages, model=model, timeout=TIMEOUT_AUTOCOMPLETE,
-                use_cache_key=cache_key,
+                use_cache_key=cache_key, single_line=True,
             )
+            suggestion = _strip_echo(buffer, suggestion)
             # FIM post-process: ensure leading space for special chars
             suggestion = _ensure_leading_space(buffer, suggestion)
 
@@ -255,13 +305,11 @@ class GhstDaemon:
         full_command = buffer + suggestion if buffer else suggestion
         warning = check_dangerous(full_command)
 
-        response: dict[str, Any] = {
-            "type": "complete",
-            "request_id": request_id,
-            "suggestion": suggestion,
-        }
+        # "suggestion" stays the last field: the shell parses it from the end
+        response: dict[str, Any] = {"type": "complete", "request_id": request_id}
         if warning:
             response["warning"] = warning
+        response["suggestion"] = suggestion
 
         return response
 
@@ -378,9 +426,24 @@ class GhstDaemon:
                     logger.warning("Invalid JSON received: %r", line[:200])
                     continue
 
+                if data.get("type") == "complete" and data.get("stream_history"):
+                    # Show the best history match at once while the model works
+                    buffer = data.get("buffer", "")
+                    matches = await _atuin_matches(buffer, data.get("cwd", ""))
+                    data["_history_matches"] = matches
+                    if matches and matches[0].startswith(buffer):
+                        partial = {
+                            "type": "complete",
+                            "request_id": data.get("request_id", ""),
+                            "partial": True,
+                            "suggestion": matches[0][len(buffer):],
+                        }
+                        writer.write(json.dumps(partial, ensure_ascii=False).encode() + b"\n")
+                        await writer.drain()
+
                 response = await self.handle_request(data)
                 logger.debug("Request: %s → %s", data.get("type"), response)
-                writer.write(json.dumps(response).encode() + b"\n")
+                writer.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             pass

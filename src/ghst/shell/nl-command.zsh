@@ -365,5 +365,5 @@ zle -N __ghst_nl_undo
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
 bindkey '^G' __ghst_nl_command        # Ctrl+G — NL command
-bindkey '^R' __ghst_history_search    # Ctrl+R — History search
+# Ctrl+R is left to atuin; run the ghst search with: zle __ghst_history_search
 bindkey '^Z' __ghst_nl_undo           # Ctrl+Z — Undo NL command
