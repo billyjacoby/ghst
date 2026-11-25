@@ -345,7 +345,7 @@ class LLMClient:
         result["ok"] = True
         try:
             listed = {m.get("id") for m in response.json().get("data", [])}
-        except ValueError:
+        except (ValueError, AttributeError, TypeError):
             listed = set()
         if listed:
             wanted = dict.fromkeys([provider.effective_autocomplete_model, provider.model])

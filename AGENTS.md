@@ -37,7 +37,7 @@ src/ghst/
   shell/
     ghst.zsh           – precmd/preexec hooks, history helper, auto-reload, cheat sheet
     autocomplete.zsh   – ghost text via direct /dev/tty escape codes, zsocket IPC, adaptive debounce
-    nl-command.zsh     – Ctrl+G natural-language widget, Ctrl+R history search, Ctrl+Z undo
+    nl-command.zsh     – Ctrl+G natural-language widget, history search (optional hotkey), Ctrl+Z undo
 tests/
   test_config.py, test_prompts.py, test_llm.py, test_daemon.py,
   test_safety.py, test_integration.py
@@ -47,13 +47,16 @@ tests/
 
 | type | key fields |
 |------|-----------|
-| `complete` | `buffer`, `cwd`, `shell`, `history`, `exit_status`, `last_command`*, `last_output`* |
+| `complete` | `buffer`, `cwd`, `shell`, `history`, `exit_status`, `last_command`*, `last_output`*, `stream_history`†, `history_matches`‡ |
 | `nl` | `prompt`, `cwd`, `shell` |
 | `error_correct` | `failed_command`, `exit_status`, `stderr`, `cwd`, `shell` |
 | `history_search` | `query`, `history`, `shell` |
 | `reload_config` | (none) |
+| `health` | (none) — the daemon checks the LLM server and replies with `ok`, `error`, `latency_ms`, `unlisted_models`, `circuit` |
 
 \* `last_command` and `last_output` are optional fields sent only for proactive suggestions.
+† With `stream_history`, the daemon may first send a line with `"partial": true` holding the best past command, then the model's answer on a second line. `suggestion` is always the last field of a reply; the shell parses it from the end.
+‡ `history_matches` is sent by the shell when `history_source` is zsh; for atuin the daemon looks them up itself.
 
 ### Configuration (`~/.config/ghst/config.toml`)
 
@@ -88,17 +91,17 @@ uv run ghst status            # check daemon status
 ## Key Design Decisions
 
 - **Never auto-execute** — all suggestions are shown as editable ghost text
-- **Ghost text via /dev/tty** — POSTDISPLAY doesn't render ANSI escapes on zsh 5.9 macOS; $BUFFER is empty in `zle -F` callbacks. Direct `echo -n '\e[90m'... > /dev/tty` is the only working approach.
+- **Ghost text via /dev/tty** — POSTDISPLAY doesn't render ANSI escapes on zsh 5.9 macOS. Direct `echo -n '\e[90m'... > /dev/tty` is the only working approach. $BUFFER is empty in plain `zle -F` callbacks, so the autocomplete response handler is registered with `zle -F -w` (as a widget) to see what the user typed since the request.
 - **All colored output via /dev/tty** — POSTDISPLAY cannot render ANSI escape sequences at all on zsh 5.9 macOS. Any colored UI element (status messages, spinners, ghost text) must write directly to `/dev/tty`. POSTDISPLAY should only be used for plain uncolored text.
 - **ANSI-C quoting in eval** — `$'\e[36m'` does NOT work inside `"${param:-...}"` double-quoted parameter expansion when shell code runs through `eval "$(cmd)"`. Always assign defaults separately: `typeset -g VAR=$'\e[36m'` then `[[ -n "$OVERRIDE" ]] && VAR="$OVERRIDE"`.
 - **PROMPT escape wrapping** — escape sequences in zsh PROMPT must be wrapped in `%{...%}` (e.g. `%{$'\e[36m'%}text%{$'\e[0m'%}`) so ZLE calculates cursor position correctly. Without this, line editing breaks on long inputs.
 - **Configurable UI colors** — all colored UI elements (ghost text, accent, success, warning, error) are configurable via `config.toml`. Colors are converted to escape sequences in `cli.py` and exported as `__GHST_*_ESC` env vars. Shell code sets ANSI defaults then overrides from env vars.
 - **zsocket for IPC** — `zsh/net/socket` provides native Unix socket access without spawning subprocesses per request. The fd integrates with `zle -F` for async response handling.
 - **Shell file inlining** — `shell-init` reads and prints the contents of all .zsh files rather than emitting `source` commands. Avoids path resolution issues with pipx/uv tool installs.
-- **Adaptive debounce** — 200ms base, 100ms when buffer ≥8 chars. Timer via `exec {fd}< <(sleep ...)` + `zle -F`.
+- **Adaptive debounce** — 100ms base, 50ms when buffer ≥8 chars (configurable; `shell-init` passes the `[ui]` delay, min-chars and hotkey settings to the shell). Timer via `exec {fd}< <(sleep ...)` + `zle -F`.
 - **Circuit breaker** — 3 consecutive failures → 30s cooldown → probe
 - **Idle timeout** — daemon auto-exits after 30 minutes of inactivity
-- **Rate limiting** — 60 requests/minute to prevent burning API quota
+- **Rate limiting** — 240 requests/minute by default (`rate_limit_rpm`) to prevent burning API quota
 - **Safety** — dangerous command warnings, secret sanitization before LLM calls
 - **FIM-style autocomplete prompt** — system prompt tells the model to "continue the text from where it left off" (like Tab completion). This avoids spacing/restructuring issues that instruction-following prompts cause.
 - **Rich autocomplete context** — every autocomplete request includes cwd, directory listing, git branch/status/branches, project type (from marker files), active virtualenv/conda, and recent history. The model sees the real environment instead of relying on post-processing hacks.
@@ -111,7 +114,7 @@ uv run ghst status            # check daemon status
 - **recursive-edit** — NL command and history search use ZLE recursive-edit for full line editing instead of raw `read -r`
 - **Disable autocomplete during recursive-edit** — `__ghst_self_insert` (bound to all printable chars) triggers autocomplete on every keystroke. During NL/history recursive-edit, this sends the user's English text as autocomplete requests, producing garbage responses and stale FDs that interfere after the widget returns. Use `__GHST_AUTOCOMPLETE_DISABLED` flag, set in `__ghst_enter_mode`/`__ghst_exit_mode`.
 - **Clean up autocomplete FDs before and after NL/history** — stale `zle -F` response FDs from before entering NL mode can fire after the widget places its result in BUFFER. The `zle -R` in `__ghst_on_response` redraws and wipes the generated command. Cancel debounce and close response FDs at mode entry AND after the spinner/request completes.
-- **Never interpolate user data into Python strings** — shell history, user input, and buffer contents must be piped through stdin to `python3` for JSON encoding. Direct interpolation into triple-quoted strings (`'''$var'''`) breaks on quotes, backslashes, and special characters, producing invalid JSON.
+- **Never interpolate user data into Python strings** — shell history, user input, and buffer contents must be piped through stdin to `python3` for JSON encoding, or escaped with `__ghst_json_str` (autocomplete builds its requests this way to avoid a subprocess per keystroke). Send with `print -r`: plain `print` rewrites backslashes and breaks the JSON. Direct interpolation into triple-quoted strings (`'''$var'''`) breaks on quotes, backslashes, and special characters, producing invalid JSON.
 - **IPC timeouts** — `__ghst_request` must have a timeout (socat `-T`, python `settimeout`). Without it, socat hangs forever on stale sockets from crashed daemons, freezing the shell.
 - **Ctrl+Z undo** — reverts NL-generated commands back to the original buffer
 - **Model aliases over dated snapshots** — always use short model aliases (e.g. `claude-sonnet-4-5`, `claude-haiku-4-5`, `gpt-4o`) instead of dated snapshot names

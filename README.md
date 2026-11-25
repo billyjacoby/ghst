@@ -6,7 +6,7 @@ LLM-powered ghost-text autocomplete, natural language commands, and semantic his
 
 - **Autocomplete** — Ghost text suggestions as you type, powered by an LLM with shell context. Accept with Tab/→.
 - **Natural Language Commands** — Press Ctrl+G, describe what you want in English, get a shell command.
-- **History Search** — Press Ctrl+R to search your shell history with natural language instead of substring matching.
+- **History Search** — Search your shell history with natural language instead of substring matching (bind it with `history_search_hotkey`, e.g. `"^R"`).
 
 ## Install
 
@@ -74,7 +74,7 @@ $ find . -name "*.py" -mtime -7█
 
 The generated command is placed in your buffer for review — **never auto-executed**. Press **Ctrl+Z** to undo and restore your original buffer.
 
-### History Search (Ctrl+R)
+### History Search (`history_search_hotkey`, unbound by default)
 
 ```
 ghst history> that docker command for postgres
@@ -98,10 +98,16 @@ model = "gpt-4o"                        # Model for NL commands
 autocomplete_model = "gpt-4o-mini"      # Fast model for autocomplete
 
 [ui]
-autocomplete_delay_ms = 200             # Debounce delay (ms)
-autocomplete_min_chars = 3              # Min chars before autocomplete fires
+autocomplete_delay_ms = 100             # Debounce delay (ms)
+autocomplete_min_chars = 2              # Min chars before autocomplete fires
 nl_hotkey = "^G"                        # NL command hotkey
-history_search_hotkey = "^R"            # History search hotkey
+history_search_hotkey = ""              # History search hotkey ("" = unbound, "^R" to take Ctrl+R)
+history_source = "auto"                 # Past commands: "auto" (atuin, else zsh), "atuin", "zsh", "off"
+history_match_limit = 5                 # How many past commands to use
+instant_history = true                  # Show the best past command before the model answers
+autocomplete_max_tokens = 32            # Longest ghost-text reply
+autocomplete_timeout_ms = 3000          # Give up on a ghost-text request after this long
+rate_limit_rpm = 240                    # Most model requests per minute
 ghost_color = "#6e7681"                 # Ghost text color (hex or 256-color index)
 accent_color = "#79c0ff"                # Prompt accent color (ghst>, spinner)
 success_color = "#56d364"               # Success indicator (✓)

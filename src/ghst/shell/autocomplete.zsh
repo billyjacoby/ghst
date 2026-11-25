@@ -74,8 +74,9 @@ __ghst_send_request() {
     local -a matches match_parts
     if [[ "$__GHST_HISTORY_SOURCE" == zsh ]] && (( ${__GHST_HISTORY_LIMIT:-5} > 0 )); then
         zmodload -F zsh/parameter p:history 2>/dev/null
-        matches=( ${(M)${(v)history}:#$buffer?*} )
-        matches=( ${(u)matches:#*$'\n'*} )
+        # (b) + ~ match the typed text literally, even with GLOB_SUBST set
+        matches=( "${(@M)${(@v)history}:#${~${(b)buffer}}?*}" )
+        matches=( "${(@u)matches:#*$'\n'*}" )
         for h in "${(@)matches[1,${__GHST_HISTORY_LIMIT:-5}]}"; do
             __ghst_json_str "$h"; match_parts+=("$REPLY")
         done
@@ -135,6 +136,7 @@ __ghst_on_response() {
         suggestion="${suggestion//\\\\/$'\x01'}"
         suggestion="${suggestion//\\\"/\"}"
         suggestion="${suggestion//\\n/$'\n'}"
+        suggestion="${suggestion//\\t/$'\t'}"
         suggestion="${suggestion//$'\x01'/\\}"
     fi
 

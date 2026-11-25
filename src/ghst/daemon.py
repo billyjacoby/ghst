@@ -145,7 +145,12 @@ async def _atuin_matches(buffer: str, cwd: str, limit: int = 8) -> list[str]:
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=0.5)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=0.5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
         # atuin prints oldest first
         return out.decode(errors="replace").split("\0")[::-1]
 
@@ -268,10 +273,10 @@ class GhstDaemon:
             # Regular autocomplete
             exit_status = data.get("exit_status", 0)
             ctx = self.context.gather(cwd, shell)
-            raw_matches = data.get("_history_matches")
-            if raw_matches is None:
+            raw_matches = data.get("history_matches")
+            if not isinstance(raw_matches, list):
                 raw_matches = await self._history_matches(buffer, cwd)
-            history_matches = sanitize_history(raw_matches)
+            history_matches = sanitize_history([m for m in raw_matches if isinstance(m, str)])
             messages = [
                 {"role": "system", "content": autocomplete_system()},
                 {"role": "user", "content": autocomplete_user(
@@ -455,7 +460,7 @@ class GhstDaemon:
                     if not isinstance(matches, list):
                         matches = await self._history_matches(buffer, data.get("cwd", ""))
                     matches = [m for m in matches if isinstance(m, str)]
-                    data["_history_matches"] = matches
+                    data["history_matches"] = matches
                     if (
                         self.config.ui.instant_history
                         and matches
