@@ -106,7 +106,7 @@ def autocomplete_user(
         context_lines.append(
             "Past commands starting with the same text (most recent first; "
             "continue toward the most likely one):\n"
-            + "\n".join(m[:120] for m in history_matches[:5])
+            + "\n".join(m[:120] for m in history_matches)
         )
 
     context_block = "\n".join(context_lines)

@@ -6,7 +6,8 @@ Loads settings from ~/.config/ghst/config.toml with env var overrides.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+import shutil
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -70,7 +71,8 @@ class UIConfig:
     autocomplete_delay_threshold: int = 8
     autocomplete_min_chars: int = 2
     nl_hotkey: str = "^G"
-    history_search_hotkey: str = "^R"
+    # Unbound by default so Ctrl+R stays with atuin; set to "^R" to take it over
+    history_search_hotkey: str = ""
     cheat_sheet_hotkey: str = "^_"
     ghost_color: str = ""
     accent_color: str = ""
@@ -84,6 +86,27 @@ class UIConfig:
     proactive_capture_blocklist: list[str] = field(
         default_factory=lambda: list(DEFAULT_CAPTURE_BLOCKLIST)
     )
+    # Autocomplete engine
+    # Where past commands come from: "auto" (atuin if installed, else zsh),
+    # "atuin", "zsh" or "off"
+    history_source: str = "auto"
+    history_match_limit: int = 5
+    instant_history: bool = True
+    autocomplete_max_tokens: int = 32
+    autocomplete_timeout_ms: int = 3000
+    rate_limit_rpm: int = 240
+
+
+HISTORY_SOURCES = ("auto", "atuin", "zsh", "off")
+
+
+def resolve_history_source(value: str) -> str:
+    """Turn the history_source setting into "atuin", "zsh" or "off"."""
+    if value not in HISTORY_SOURCES or value == "auto":
+        return "atuin" if shutil.which("atuin") else "zsh"
+    if value == "atuin" and not shutil.which("atuin"):
+        return "zsh"
+    return value
 
 
 @dataclass
@@ -121,27 +144,8 @@ class GhstConfig:
         if env_key:
             provider.api_key = env_key
 
-        ui = UIConfig(
-            autocomplete_delay_ms=ui_raw.get("autocomplete_delay_ms", 200),
-            autocomplete_delay_short_ms=ui_raw.get("autocomplete_delay_short_ms", 100),
-            autocomplete_delay_threshold=ui_raw.get("autocomplete_delay_threshold", 8),
-            autocomplete_min_chars=ui_raw.get("autocomplete_min_chars", 3),
-            nl_hotkey=ui_raw.get("nl_hotkey", "^G"),
-            history_search_hotkey=ui_raw.get("history_search_hotkey", "^R"),
-            cheat_sheet_hotkey=ui_raw.get("cheat_sheet_hotkey", "^_"),
-            ghost_color=ui_raw.get("ghost_color", ""),
-            accent_color=ui_raw.get("accent_color", ""),
-            success_color=ui_raw.get("success_color", ""),
-            warning_color=ui_raw.get("warning_color", ""),
-            error_color=ui_raw.get("error_color", ""),
-            history_search_limit=ui_raw.get("history_search_limit", 500),
-            error_correction=ui_raw.get("error_correction", True),
-            proactive_suggestions=ui_raw.get("proactive_suggestions", True),
-            proactive_output_lines=ui_raw.get("proactive_output_lines", 50),
-            proactive_capture_blocklist=ui_raw.get(
-                "proactive_capture_blocklist", list(DEFAULT_CAPTURE_BLOCKLIST)
-            ),
-        )
+        known = {f.name for f in fields(UIConfig)}
+        ui = UIConfig(**{k: v for k, v in ui_raw.items() if k in known})
 
         return cls(provider=provider, ui=ui, config_path=config_path)
 
@@ -168,6 +172,12 @@ class GhstConfig:
         "error_correction": ("ui", "error_correction"),
         "proactive_suggestions": ("ui", "proactive_suggestions"),
         "proactive_output_lines": ("ui", "proactive_output_lines"),
+        "history_source": ("ui", "history_source"),
+        "history_match_limit": ("ui", "history_match_limit"),
+        "instant_history": ("ui", "instant_history"),
+        "autocomplete_max_tokens": ("ui", "autocomplete_max_tokens"),
+        "autocomplete_timeout_ms": ("ui", "autocomplete_timeout_ms"),
+        "rate_limit_rpm": ("ui", "rate_limit_rpm"),
     }
 
     def get_flat(self, key: str) -> Any:
@@ -217,42 +227,19 @@ class GhstConfig:
         lines.append('')
         lines.append('[ui]')
         defaults = UIConfig()
-        if self.ui.autocomplete_delay_ms != defaults.autocomplete_delay_ms:
-            lines.append(f'autocomplete_delay_ms = {self.ui.autocomplete_delay_ms}')
-        if self.ui.autocomplete_delay_short_ms != defaults.autocomplete_delay_short_ms:
-            lines.append(
-                f'autocomplete_delay_short_ms = {self.ui.autocomplete_delay_short_ms}'
-            )
-        if self.ui.autocomplete_delay_threshold != defaults.autocomplete_delay_threshold:
-            lines.append(
-                f'autocomplete_delay_threshold = {self.ui.autocomplete_delay_threshold}'
-            )
-        if self.ui.autocomplete_min_chars != defaults.autocomplete_min_chars:
-            lines.append(f'autocomplete_min_chars = {self.ui.autocomplete_min_chars}')
-        if self.ui.nl_hotkey != defaults.nl_hotkey:
-            lines.append(f'nl_hotkey = "{esc(self.ui.nl_hotkey)}"')
-        if self.ui.history_search_hotkey != defaults.history_search_hotkey:
-            lines.append(f'history_search_hotkey = "{esc(self.ui.history_search_hotkey)}"')
-        if self.ui.error_correction != defaults.error_correction:
-            v = "true" if self.ui.error_correction else "false"
-            lines.append(f'error_correction = {v}')
-        if self.ui.proactive_suggestions != defaults.proactive_suggestions:
-            v = "true" if self.ui.proactive_suggestions else "false"
-            lines.append(f'proactive_suggestions = {v}')
-        if self.ui.proactive_output_lines != defaults.proactive_output_lines:
-            lines.append(f'proactive_output_lines = {self.ui.proactive_output_lines}')
-        if self.ui.ghost_color:
-            lines.append(f'ghost_color = "{esc(self.ui.ghost_color)}"')
-        if self.ui.accent_color:
-            lines.append(f'accent_color = "{esc(self.ui.accent_color)}"')
-        if self.ui.success_color:
-            lines.append(f'success_color = "{esc(self.ui.success_color)}"')
-        if self.ui.warning_color:
-            lines.append(f'warning_color = "{esc(self.ui.warning_color)}"')
-        if self.ui.error_color:
-            lines.append(f'error_color = "{esc(self.ui.error_color)}"')
-        if self.ui.history_search_limit != defaults.history_search_limit:
-            lines.append(f'history_search_limit = {self.ui.history_search_limit}')
+        for f in fields(UIConfig):
+            value = getattr(self.ui, f.name)
+            if value == getattr(defaults, f.name):
+                continue
+            if isinstance(value, bool):
+                lines.append(f"{f.name} = {'true' if value else 'false'}")
+            elif isinstance(value, int):
+                lines.append(f"{f.name} = {value}")
+            elif isinstance(value, str):
+                lines.append(f'{f.name} = "{esc(value)}"')
+            elif isinstance(value, list):
+                items = ", ".join(f'"{esc(str(v))}"' for v in value)
+                lines.append(f"{f.name} = [{items}]")
 
         lines.append('')
         target.write_text('\n'.join(lines), encoding='utf-8')

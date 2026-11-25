@@ -34,7 +34,7 @@ class TestDefaults:
         assert config.ui.autocomplete_delay_threshold == 8
         assert config.ui.autocomplete_min_chars == 2
         assert config.ui.nl_hotkey == "^G"
-        assert config.ui.history_search_hotkey == "^R"
+        assert config.ui.history_search_hotkey == ""
         assert config.ui.error_correction is True
         assert config.ui.proactive_suggestions is True
         assert config.ui.proactive_output_lines == 50
@@ -78,7 +78,7 @@ model = "claude-sonnet-4-5"
         assert config.provider.api_key == "sk-ant-test"
         assert config.provider.model == "claude-sonnet-4-5"
         # UI defaults preserved
-        assert config.ui.autocomplete_delay_ms == 200
+        assert config.ui.autocomplete_delay_ms == 100
 
     def test_load_full(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.toml"
@@ -107,7 +107,7 @@ proactive_suggestions = false
         config = GhstConfig.load(tmp_path / "nonexistent.toml")
         # Should return defaults
         assert config.provider.name == "openai"
-        assert config.ui.autocomplete_delay_ms == 200
+        assert config.ui.autocomplete_delay_ms == 100
 
 
 class TestEnvVarOverride:
@@ -156,3 +156,37 @@ class TestSocketPath:
         uid = os.getuid()
         assert config.get_socket_path() == Path(f"/tmp/ghst-{uid}.sock")
         assert config.get_pid_path() == Path(f"/tmp/ghst-{uid}.pid")
+
+
+class TestAutocompleteSettings:
+    """Settings added for the local-model autocomplete engine."""
+
+    def test_defaults(self) -> None:
+        ui = GhstConfig().ui
+        assert ui.history_source == "auto"
+        assert ui.history_match_limit == 5
+        assert ui.instant_history is True
+        assert ui.autocomplete_max_tokens == 32
+        assert ui.autocomplete_timeout_ms == 3000
+        assert ui.rate_limit_rpm == 240
+
+    def test_load_and_write_round_trip(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.toml"
+        path.write_text("""
+[ui]
+history_source = "zsh"
+autocomplete_timeout_ms = 1500
+history_search_hotkey = "^R"
+unknown_key = 1
+""")
+        config = GhstConfig.load(path)
+        assert config.ui.history_source == "zsh"
+        assert config.ui.autocomplete_timeout_ms == 1500
+        assert config.ui.history_search_hotkey == "^R"
+
+        config.set_value("rate_limit_rpm", "100")
+        reloaded = GhstConfig.load(path)
+        assert reloaded.ui.rate_limit_rpm == 100
+        assert reloaded.ui.history_source == "zsh"
+        assert reloaded.ui.autocomplete_timeout_ms == 1500
+        assert reloaded.ui.history_search_hotkey == "^R"

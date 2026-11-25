@@ -70,9 +70,22 @@ __ghst_send_request() {
         [[ -n "$h" ]] || continue
         __ghst_json_str "$h"; parts+=("$REPLY")
     done
+    # zsh history source: prefix matches from this shell's history, newest first
+    local -a matches match_parts
+    if [[ "$__GHST_HISTORY_SOURCE" == zsh ]] && (( ${__GHST_HISTORY_LIMIT:-5} > 0 )); then
+        zmodload -F zsh/parameter p:history 2>/dev/null
+        matches=( ${(M)${(v)history}:#$buffer?*} )
+        matches=( ${(u)matches:#*$'\n'*} )
+        for h in "${(@)matches[1,${__GHST_HISTORY_LIMIT:-5}]}"; do
+            __ghst_json_str "$h"; match_parts+=("$REPLY")
+        done
+    fi
+    local match_field=""
+    [[ "$__GHST_HISTORY_SOURCE" == zsh ]] && match_field=",\"history_matches\":[${(j:,:)match_parts}]"
+
     __ghst_json_str "$buffer"; local buf_json="$REPLY"
     __ghst_json_str "$PWD"; local cwd_json="$REPLY"
-    local json_req="{\"type\":\"complete\",\"request_id\":\"ac-$RANDOM\",\"buffer\":$buf_json,\"cursor_pos\":$cursor_pos,\"cwd\":$cwd_json,\"shell\":\"zsh\",\"history\":[${(j:,:)parts}],\"exit_status\":${__GHST_LAST_EXIT:-0},\"stream_history\":true}"
+    local json_req="{\"type\":\"complete\",\"request_id\":\"ac-$RANDOM\",\"buffer\":$buf_json,\"cursor_pos\":$cursor_pos,\"cwd\":$cwd_json,\"shell\":\"zsh\",\"history\":[${(j:,:)parts}],\"exit_status\":${__GHST_LAST_EXIT:-0},\"stream_history\":true$match_field}"
     __GHST_REQ_BUFFER="$buffer"
 
     # Close any previous in-flight request

@@ -211,7 +211,7 @@ class LLMClient:
 
         try:
             if self._is_anthropic():
-                result = await self._complete_anthropic(messages, model, timeout)
+                result = await self._complete_anthropic(messages, model, timeout, single_line)
             else:
                 result = await self._complete_openai(messages, model, timeout, single_line)
 
@@ -246,7 +246,7 @@ class LLMClient:
         }
         if single_line:
             # Ghost text is one line; stop there instead of generating a list
-            body.update(max_tokens=32, stop=["\n"])
+            body.update(max_tokens=self.config.ui.autocomplete_max_tokens, stop=["\n"])
         response = await client.post(
             f"{base_url}/chat/completions",
             json=body,
@@ -265,6 +265,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         model: str,
         timeout: httpx.Timeout,
+        single_line: bool = False,
     ) -> str:
         client = await self._get_client()
         base_url = self.config.provider.effective_api_base_url.rstrip("/")
@@ -284,7 +285,7 @@ class LLMClient:
         body: dict[str, Any] = {
             "model": model,
             "messages": anthropic_messages,
-            "max_tokens": 200,
+            "max_tokens": self.config.ui.autocomplete_max_tokens if single_line else 200,
             "temperature": 0.3,
         }
         if system_text:
@@ -306,6 +307,50 @@ class LLMClient:
         response.raise_for_status()
         data = response.json()
         return data["content"][0]["text"].strip()
+
+    async def probe(self) -> dict[str, Any]:
+        """Check that the LLM server answers and lists the configured models."""
+        provider = self.config.provider
+        base_url = provider.effective_api_base_url.rstrip("/")
+        if self._is_anthropic():
+            url = f"{base_url}/v1/models"
+            headers = {"x-api-key": provider.api_key, "anthropic-version": "2023-06-01"}
+        else:
+            url = f"{base_url}/models"
+            headers = {"Authorization": f"Bearer {provider.api_key}"}
+
+        result: dict[str, Any] = {"ok": False, "url": base_url}
+        client = await self._get_client()
+        start = time.monotonic()
+        try:
+            response = await client.get(url, headers=headers, timeout=httpx.Timeout(3.0))
+        except httpx.ConnectError:
+            result["error"] = "cannot connect"
+            return result
+        except httpx.TimeoutException:
+            result["error"] = "timed out after 3s"
+            return result
+        except httpx.HTTPError as e:
+            result["error"] = str(e) or type(e).__name__
+            return result
+        result["latency_ms"] = round((time.monotonic() - start) * 1000)
+
+        if response.status_code in (401, 403):
+            result["error"] = f"API key rejected (HTTP {response.status_code})"
+            return result
+        if response.status_code >= 400:
+            result["error"] = f"HTTP {response.status_code}"
+            return result
+
+        result["ok"] = True
+        try:
+            listed = {m.get("id") for m in response.json().get("data", [])}
+        except ValueError:
+            listed = set()
+        if listed:
+            wanted = dict.fromkeys([provider.effective_autocomplete_model, provider.model])
+            result["unlisted_models"] = [m for m in wanted if m not in listed]
+        return result
 
     async def complete_with_retry(
         self,

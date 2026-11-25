@@ -364,6 +364,7 @@ __ghst_nl_undo() {
 zle -N __ghst_nl_undo
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
-bindkey '^G' __ghst_nl_command        # Ctrl+G — NL command
-# Ctrl+R is left to atuin; run the ghst search with: zle __ghst_history_search
+# Hotkeys come from the config (nl_hotkey, history_search_hotkey); empty = unbound
+[[ -n "${__GHST_NL_HOTKEY-^G}" ]] && bindkey "${__GHST_NL_HOTKEY-^G}" __ghst_nl_command
+[[ -n "$__GHST_HISTORY_HOTKEY" ]] && bindkey "$__GHST_HISTORY_HOTKEY" __ghst_history_search
 bindkey '^Z' __ghst_nl_undo           # Ctrl+Z — Undo NL command

@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from ghst.config import GhstConfig
+from ghst.config import GhstConfig, resolve_history_source
 
 
 def _strip_control_chars(s: str) -> str:
@@ -79,11 +79,28 @@ def _shell_init_zsh(config: GhstConfig) -> None:
         if esc:
             color_exports += f"\nexport __GHST_{name}_ESC=$'{esc}'"
 
+    def q(value: str) -> str:
+        return "'" + value.replace("'", "'\\''") + "'"
+
+    ui = config.ui
+    ui_settings = (
+        f"typeset -gi __GHST_DELAY={int(ui.autocomplete_delay_ms)}"
+        f" __GHST_DELAY_SHORT={int(ui.autocomplete_delay_short_ms)}"
+        f" __GHST_DELAY_THRESHOLD={int(ui.autocomplete_delay_threshold)}"
+        f" __GHST_MIN_CHARS={int(ui.autocomplete_min_chars)}\n"
+        f"typeset -g __GHST_HISTORY_SOURCE={resolve_history_source(ui.history_source)}"
+        f" __GHST_HISTORY_LIMIT={int(ui.history_match_limit)}\n"
+        f"typeset -g __GHST_NL_HOTKEY={q(ui.nl_hotkey)}"
+        f" __GHST_HISTORY_HOTKEY={q(ui.history_search_hotkey)}"
+        f" __GHST_CHEAT_HOTKEY={q(ui.cheat_sheet_hotkey)}"
+    )
+
     print(f'''# ghst — AI-powered shell plugin
 # Add to .zshrc: eval "$(ghst shell-init zsh)"
 
 export __GHST_SRC_DIR="{src_dir}"
 export __GHST_SOCKET="{socket_path}"{ghost_export}{color_exports}
+{ui_settings}
 
 # Ensure ghst CLI is on PATH
 [[ ":$PATH:" != *":{bin_dir}:"* ]] && export PATH="{bin_dir}:$PATH"
@@ -146,6 +163,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
     daemon_cmd = [sys.executable, "-m", "ghst.daemon"]
     proc = subprocess.Popen(
         daemon_cmd,
+        stdin=subprocess.DEVNULL,  # never hold on to the terminal
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -217,35 +235,62 @@ def _cmd_status(args: argparse.Namespace) -> None:
     print(f"  config:     {config.config_path}")
     print(f"  socket:     {config.get_socket_path()}")
 
-    # Query daemon for health info if running
-    if running:
-        health = _query_daemon_health(config)
-        if health:
-            _print_health(health)
+    health = _query_daemon_health(config) if running else None
+    if health is None:
+        health = _probe_directly(config)
+    _print_health(health, config)
 
 
 def _query_daemon_health(config: GhstConfig) -> dict | None:
-    """Query the daemon for connection health info via reload_config."""
-    # We reuse the socket to get a simple ping; full health reporting
-    # would require a dedicated status endpoint in the daemon
+    """Ask the running daemon to check the LLM server."""
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        sock.connect(str(config.get_socket_path()))
-        sock.sendall(b'{"type":"reload_config"}\n')
-        data = sock.recv(4096)
-        sock.close()
-        if data:
-            return json.loads(data.decode())
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(str(config.get_socket_path()))
+            sock.sendall(b'{"type":"health"}\n')
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        health = json.loads(data.decode())
     except (OSError, json.JSONDecodeError):
-        pass
-    return None
+        return None
+    return health if health.get("type") == "health" else None
 
 
-def _print_health(health: dict) -> None:
-    """Print connection health information."""
+def _probe_directly(config: GhstConfig) -> dict:
+    """Check the LLM server from the CLI when the daemon can't."""
+    import asyncio
+
+    from ghst.llm import LLMClient
+
+    async def run() -> dict:
+        client = LLMClient(config)
+        try:
+            return await client.probe()
+        finally:
+            await client.close()
+
+    return asyncio.run(run())
+
+
+def _print_health(health: dict, config: GhstConfig) -> None:
+    """Print whether the LLM server is usable."""
+    url = health.get("url", config.provider.effective_api_base_url)
     if health.get("ok"):
-        print("  connection: ok")
+        print(f"  server:     ok ({url}, {health.get('latency_ms', '?')}ms)")
+    else:
+        print(f"  server:     DOWN ({url}: {health.get('error', 'unknown error')})")
+    for model in health.get("unlisted_models") or []:
+        print(f"  warning:    model '{model}' is not listed by the server")
+    circuit = health.get("circuit") or {}
+    if circuit.get("state", "closed") != "closed":
+        print(
+            f"  paused:     after {circuit.get('consecutive_failures', 0)} failed requests;"
+            f" retrying in {circuit.get('probe_in_seconds', 0)}s"
+        )
 
 
 # ── Init wizard ──────────────────────────────────────────────────────────────

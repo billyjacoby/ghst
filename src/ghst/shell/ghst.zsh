@@ -96,7 +96,6 @@ __ghst_cheat_sheet() {
   │  Shift+→     Accept one word            │
   │  Esc         Dismiss suggestion         │
   │  Ctrl+G      Natural language command   │
-  │  Ctrl+R      Search history by intent   │
   │  Ctrl+Z      Undo generated command     │
   │  Ctrl+/      This cheat sheet           │
   │                                         │
@@ -125,6 +124,6 @@ add-zsh-hook preexec __ghst_preexec
 add-zsh-hook precmd __ghst_precmd
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
-bindkey '^_' __ghst_cheat_sheet  # Ctrl+/
+[[ -n "${__GHST_CHEAT_HOTKEY-^_}" ]] && bindkey "${__GHST_CHEAT_HOTKEY-^_}" __ghst_cheat_sheet
 
 fi  # end of __GHST_LOADED guard

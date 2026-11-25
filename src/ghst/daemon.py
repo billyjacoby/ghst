@@ -21,9 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ghst.config import GhstConfig
+import httpx
+
+from ghst.config import GhstConfig, resolve_history_source
 from ghst.context import ContextInfo
-from ghst.llm import TIMEOUT_AUTOCOMPLETE, TIMEOUT_HISTORY, TIMEOUT_NL, LLMClient
+from ghst.llm import TIMEOUT_HISTORY, TIMEOUT_NL, LLMClient
 from ghst.prompts import (
     COMMAND_SYSTEM,
     autocomplete_system,
@@ -140,7 +142,8 @@ async def _atuin_matches(buffer: str, cwd: str, limit: int = 8) -> list[str]:
         proc = await asyncio.create_subprocess_exec(
             atuin, "search", "--search-mode", "prefix", "--filter-mode", "global",
             "--limit", "20", "--cmd-only", "--print0", *extra, "--", buffer,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, env=env,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=0.5)
         # atuin prints oldest first
@@ -179,7 +182,7 @@ class GhstDaemon:
         self.session = SessionBuffer()
         self._server: asyncio.AbstractServer | None = None
         self._last_activity: float = 0.0
-        self._rate_limiter = RateLimiter()
+        self._rate_limiter = RateLimiter(self.config.ui.rate_limit_rpm)
         self._inflight_complete: asyncio.Task[dict[str, Any]] | None = None
 
     async def handle_request(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -211,6 +214,8 @@ class GhstDaemon:
                 return await self._handle_error_correct(data)
             elif req_type == "history_search":
                 return await self._handle_history_search(data)
+            elif req_type == "health":
+                return await self._handle_health()
             elif req_type == "reload_config":
                 return self._handle_reload_config()
             else:
@@ -256,7 +261,7 @@ class GhstDaemon:
             cache_key = ("proactive", last_command, cwd, str(hash(last_output)))
             model = self.config.provider.effective_autocomplete_model
             suggestion = await self.llm.complete(
-                messages, model=model, timeout=TIMEOUT_AUTOCOMPLETE,
+                messages, model=model, timeout=self._autocomplete_timeout,
                 use_cache_key=cache_key,
             )
         else:
@@ -265,7 +270,7 @@ class GhstDaemon:
             ctx = self.context.gather(cwd, shell)
             raw_matches = data.get("_history_matches")
             if raw_matches is None:
-                raw_matches = await _atuin_matches(buffer, cwd)
+                raw_matches = await self._history_matches(buffer, cwd)
             history_matches = sanitize_history(raw_matches)
             messages = [
                 {"role": "system", "content": autocomplete_system()},
@@ -284,7 +289,7 @@ class GhstDaemon:
             cache_key = ("autocomplete", buffer, cwd)
             model = self.config.provider.effective_autocomplete_model
             suggestion = await self.llm.complete(
-                messages, model=model, timeout=TIMEOUT_AUTOCOMPLETE,
+                messages, model=model, timeout=self._autocomplete_timeout,
                 use_cache_key=cache_key, single_line=True,
             )
             suggestion = _strip_echo(buffer, suggestion)
@@ -365,7 +370,7 @@ class GhstDaemon:
         ]
         model = self.config.provider.effective_autocomplete_model
         suggestion = await self.llm.complete(
-            messages, model=model, timeout=TIMEOUT_AUTOCOMPLETE,
+            messages, model=model, timeout=self._autocomplete_timeout,
         )
 
         return {"type": "error_correct", "suggestion": suggestion.rstrip()}
@@ -400,11 +405,28 @@ class GhstDaemon:
 
         return {"type": "history_search", "results": results}
 
+    @property
+    def _autocomplete_timeout(self) -> httpx.Timeout:
+        read = self.config.ui.autocomplete_timeout_ms / 1000
+        return httpx.Timeout(connect=1.0, read=read, write=1.0, pool=1.0)
+
+    async def _history_matches(self, buffer: str, cwd: str) -> list[str]:
+        """Past commands from atuin. The shell sends zsh matches itself."""
+        ui = self.config.ui
+        if resolve_history_source(ui.history_source) != "atuin" or ui.history_match_limit <= 0:
+            return []
+        return await _atuin_matches(buffer, cwd, limit=ui.history_match_limit)
+
+    async def _handle_health(self) -> dict[str, Any]:
+        probe = await self.llm.probe()
+        return {"type": "health", **probe, "circuit": self.llm.health.status_display()}
+
     def _handle_reload_config(self) -> dict[str, Any]:
         """Reload configuration from disk."""
         try:
             self.config = GhstConfig.load()
             self.llm.config = self.config
+            self._rate_limiter.rpm = self.config.ui.rate_limit_rpm
             logger.info("Configuration reloaded")
             return {"type": "reload_config", "ok": True}
         except Exception as e:
@@ -429,9 +451,16 @@ class GhstDaemon:
                 if data.get("type") == "complete" and data.get("stream_history"):
                     # Show the best history match at once while the model works
                     buffer = data.get("buffer", "")
-                    matches = await _atuin_matches(buffer, data.get("cwd", ""))
+                    matches = data.get("history_matches")
+                    if not isinstance(matches, list):
+                        matches = await self._history_matches(buffer, data.get("cwd", ""))
+                    matches = [m for m in matches if isinstance(m, str)]
                     data["_history_matches"] = matches
-                    if matches and matches[0].startswith(buffer):
+                    if (
+                        self.config.ui.instant_history
+                        and matches
+                        and matches[0].startswith(buffer)
+                    ):
                         partial = {
                             "type": "complete",
                             "request_id": data.get("request_id", ""),

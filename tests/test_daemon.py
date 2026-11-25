@@ -137,3 +137,16 @@ class TestDaemonRequestHandling:
             "history": [],
         })
         assert result["results"] == []
+
+
+async def test_health_reports_unreachable_server(tmp_path) -> None:  # noqa: ANN001
+    from ghst.config import ProviderConfig
+
+    config = GhstConfig(
+        provider=ProviderConfig(api_base_url="http://127.0.0.1:9/v1", api_key="x"),
+        config_path=tmp_path / "config.toml",
+    )
+    result = await GhstDaemon(config).handle_request({"type": "health"})
+    assert result["type"] == "health"
+    assert result["ok"] is False
+    assert result["error"] == "cannot connect"

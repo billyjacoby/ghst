@@ -20,22 +20,42 @@ model = "gpt-4o"
 
 [ui]
 # Base debounce delay (ms) before triggering autocomplete
-autocomplete_delay_ms = 200
+autocomplete_delay_ms = 100
 
 # Reduced debounce delay (ms) when buffer length >= autocomplete_delay_threshold
-autocomplete_delay_short_ms = 100
+autocomplete_delay_short_ms = 50
 
 # Character count at which debounce switches to autocomplete_delay_short_ms
 autocomplete_delay_threshold = 8
 
 # Minimum characters typed before autocomplete fires
-autocomplete_min_chars = 3
+autocomplete_min_chars = 2
+
+# Where past commands that start with what you typed come from:
+# "auto" (atuin if installed, else zsh history), "atuin", "zsh" or "off"
+history_source = "auto"
+
+# How many of those past commands to use
+history_match_limit = 5
+
+# Show the best past command as ghost text at once, before the model answers
+instant_history = true
+
+# Longest model reply for ghost text, in tokens
+autocomplete_max_tokens = 32
+
+# Give up on a ghost-text model request after this long
+autocomplete_timeout_ms = 3000
+
+# Most model requests per minute
+rate_limit_rpm = 240
 
 # Hotkey for natural language command prompt
 nl_hotkey = "^G"
 
-# Hotkey for natural language history search (replaces native Ctrl+R)
-history_search_hotkey = "^R"
+# Hotkey for natural language history search. Empty = unbound, which leaves
+# Ctrl+R to atuin or zsh; set to "^R" to take Ctrl+R over.
+history_search_hotkey = ""
 
 # Hotkey for in-shell cheat sheet
 cheat_sheet_hotkey = "^_"
