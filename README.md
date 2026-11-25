@@ -138,12 +138,20 @@ requests stop; ghst never switches to paid API billing.
 
 | Command | Description |
 |---|---|
-| `ghst init` | Interactive setup wizard |
-| `ghst start` | Start the daemon |
-| `ghst stop` | Stop the daemon |
-| `ghst status` | Show daemon health and config |
-| `ghst shell-init zsh` | Output shell integration code |
-| `ghst help` | Show all commands and shortcuts |
+| `ghst provider` | Pick a provider with the arrow keys and connect: local server (oMLX, Ollama, LM Studio), ChatGPT plan, OpenAI or Anthropic. Ends with a timed test suggestion |
+| `ghst provider set <local\|chatgpt\|openai\|anthropic>` | Same, skipping the menu |
+| `ghst model` | Pick the ghost-text and Ctrl+G models from the server's list (type to filter) |
+| `ghst model list` / `ghst model set <name>` | List models, or set one directly |
+| `ghst login` / `ghst logout` | Sign in with ChatGPT to use your plan / sign out |
+| `ghst status` | Daemon, provider, server check, ChatGPT account, last error |
+| `ghst help settings` | Every setting with what it does and its current value |
+| `ghst set` / `get` / `reset <key>` | Change, show or reset one setting |
+| `ghst init` | First-time setup: shell line, provider, daemon |
+| `ghst start` / `ghst stop` | Start or stop the daemon (normally automatic) |
+| `ghst help [command]` | Overview, or details for one command |
+
+ghst remembers each provider's settings under `[profiles.<name>]` in the config,
+so switching providers and back keeps your keys, URLs and models.
 
 ## Architecture
 

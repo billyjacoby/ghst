@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import re
@@ -237,7 +236,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
     health = _query_daemon_health(config) if running else None
     if health is None:
-        health = _probe_directly(config)
+        health = _probe(config)
     _print_health(health, config)
 
 
@@ -260,20 +259,11 @@ def _query_daemon_health(config: GhstConfig) -> dict | None:
     return health if health.get("type") == "health" else None
 
 
-def _probe_directly(config: GhstConfig) -> dict:
+def _probe(config: GhstConfig) -> dict:
     """Check the LLM server from the CLI when the daemon can't."""
-    import asyncio
+    from ghst.setup import probe
 
-    from ghst.llm import LLMClient
-
-    async def run() -> dict:
-        client = LLMClient(config)
-        try:
-            return await client.probe()
-        finally:
-            await client.close()
-
-    return asyncio.run(run())
+    return probe(config)
 
 
 def _print_health(health: dict, config: GhstConfig) -> None:
@@ -357,46 +347,16 @@ def _cmd_init(args: argparse.Namespace) -> None:
             print(f"    {init_line}")
             print(f"\n  Then restart your shell or run: exec {shell}\n")
 
-    # Step 2: Configure provider
-    print("  Choose your LLM provider:")
-    print("    1) OpenAI (default)")
-    print("    2) Anthropic")
-    print("\n  > ", end="", flush=True)
-    choice = input().strip()
-    provider = "anthropic" if choice == "2" else "openai"
+    # Step 2: Configure provider (keeps the rest of an existing config)
+    from ghst.setup import setup_provider
 
-    # API key
-    default_models = {
-        "openai": ("gpt-4o", "gpt-4o-mini"),
-        "anthropic": ("claude-sonnet-4-5", "claude-haiku-4-5"),
-    }
-
-    api_key = ""
-    env_key = os.environ.get("GHST_API_KEY", "")
-    if env_key:
-        print("\n  API key found in GHST_API_KEY environment variable ✓")
-        api_key = ""  # Don't store in config if env var is set
-    else:
-        api_key = getpass.getpass("\n  API key: ")
-        # Strip any terminal escape sequences or control characters
-        api_key = _strip_control_chars(api_key)
-
-    # Models
-    default_model, default_autocomplete = default_models[provider]
-    print(f"  Model for commands [{default_model}]: ", end="", flush=True)
-    model = input().strip() or default_model
-    print(f"  Model for autocomplete [{default_autocomplete}]: ", end="", flush=True)
-    ac_model = input().strip() or default_autocomplete
-
-    # Write config
-    config = GhstConfig()
-    config.provider.name = provider
-    config.provider.api_key = api_key
-    config.provider.model = model
-    config.provider.autocomplete_model = ac_model
-    config.write_toml()
-
-    print(f"\n  ✓ Config written to {config.config_path}")
+    print()
+    config = GhstConfig.load()
+    if not setup_provider(config):
+        print("  Provider not set up; run `ghst provider` later.")
+        return
+    provider = config.provider.name
+    ac_model = config.provider.effective_autocomplete_model
 
     # Step 3: Verify connection
     print("\n  Verifying connection...")
@@ -531,19 +491,25 @@ def _cmd_defaults(args: argparse.Namespace) -> None:
 # ── Model commands ───────────────────────────────────────────────────────────
 
 def _cmd_model(args: argparse.Namespace) -> None:
-    """Handle `ghst model`."""
+    """Handle `ghst model`: pick models from the server's list, or show them."""
     config = GhstConfig.load()
-    ac = config.provider.effective_autocomplete_model
-    nl = config.provider.model
-    name = config.provider.name
-    print(f"  autocomplete: {ac} ({name})")
-    print(f"  nl-commands:  {nl} ({name})")
+    if not sys.stdin.isatty():
+        print(f"  ghost text: {config.provider.effective_autocomplete_model}")
+        print(f"  Ctrl+G:     {config.provider.model}")
+        return
+    from ghst.setup import choose_models, report
+
+    if choose_models(config):
+        config.save_profile()
+        config.write_toml()
+        _send_reload(config)
+        report(config)
 
 
 def _cmd_model_list(args: argparse.Namespace) -> None:
     """Handle `ghst model list`."""
     config = GhstConfig.load()
-    health = _probe_directly(config)
+    health = _probe(config)
     if not health.get("ok"):
         print(f"  ghst: {health.get('error', 'could not reach the server')}", file=sys.stderr)
         sys.exit(1)
@@ -578,115 +544,53 @@ def _cmd_model_set(args: argparse.Namespace) -> None:
 # ── Provider commands ────────────────────────────────────────────────────────
 
 def _cmd_provider(args: argparse.Namespace) -> None:
-    """Handle `ghst provider`."""
+    """Handle `ghst provider`: choose and connect a provider, or show it."""
     config = GhstConfig.load()
-    print(f"  provider: {config.provider.name}")
-    print(f"  endpoint: {config.provider.effective_api_base_url}")
+    if not sys.stdin.isatty():
+        from ghst.config import profile_id
+        from ghst.setup import PROVIDER_LABELS
+
+        print(f"  provider: {PROVIDER_LABELS[profile_id(config.provider)]}")
+        print(f"  endpoint: {config.provider.effective_api_base_url}")
+        return
+    _run_setup(config, None)
 
 
 def _cmd_provider_set(args: argparse.Namespace) -> None:
     """Handle `ghst provider set <name>`."""
-    config = GhstConfig.load()
-    name = args.name
+    from ghst.setup import PROVIDER_LABELS
 
-    if name not in ("openai", "anthropic", "chatgpt"):
-        print(f"  ghst: unknown provider '{name}' (use 'openai', 'anthropic' or 'chatgpt')")
+    if args.name not in PROVIDER_LABELS:
+        names = ", ".join(PROVIDER_LABELS)
+        print(f"  ghst: unknown provider '{args.name}' (use one of: {names})", file=sys.stderr)
         sys.exit(1)
+    _run_setup(GhstConfig.load(), args.name)
 
-    if name == "chatgpt":
-        print("  Run `ghst login` to sign in with ChatGPT; it switches the provider for you.")
-        return
 
-    config.provider.name = name
+def _run_setup(config: GhstConfig, pid: str | None) -> None:
+    from ghst.setup import setup_provider
 
-    # Prompt for API key if switching providers
-    env_key = os.environ.get("GHST_API_KEY", "")
-    if not env_key:
-        api_key = getpass.getpass("  API key: ")
-        config.provider.api_key = api_key
-
-    # Suggest default models
-    defaults = {
-        "openai": ("gpt-4o", "gpt-4o-mini"),
-        "anthropic": ("claude-sonnet-4-5", "claude-haiku-4-5"),
-    }
-    default_model, default_ac = defaults[name]
-    print(f"  Model for commands [{default_model}]: ", end="", flush=True)
-    model = input().strip()
-    config.provider.model = model or default_model
-    print(f"  Model for autocomplete [{default_ac}]: ", end="", flush=True)
-    ac_model = input().strip()
-    config.provider.autocomplete_model = ac_model or default_ac
-
-    config.write_toml()
-    _send_reload(config)
-    print(f"  ✓ provider → {name}")
+    try:
+        saved = setup_provider(config, pid)
+    except KeyboardInterrupt:
+        saved = False
+        print()
+    if saved:
+        _send_reload(config)
+    else:
+        print("  Nothing changed.")
+        sys.exit(1)
 
 
 # ── ChatGPT sign-in ──────────────────────────────────────────────────────────
 
-def _choose_model(models: list[str], current: str, label: str, prefer_small: bool) -> str:
-    """Pick a model from the list, asking when the terminal is interactive."""
-    if current in models:
-        default = current
-    else:
-        small = [m for m in models if any(t in m for t in ("nano", "mini", "spark", "flash"))]
-        default = (small or models)[0] if prefer_small else models[0]
-    if not sys.stdin.isatty():
-        return default
-    print(f"\n  Model for {label}:")
-    for i, model in enumerate(models, 1):
-        print(f"    {i}. {model}{'  (default)' if model == default else ''}")
-    answer = input("  Number or name [default]: ").strip()
-    if answer.isdigit() and 1 <= int(answer) <= len(models):
-        return models[int(answer) - 1]
-    return answer or default
-
-
 def _cmd_login(args: argparse.Namespace) -> None:
     """Handle `ghst login`: sign in with ChatGPT and use the plan for requests."""
-    from ghst import chatgpt
+    from ghst.setup import sign_in_chatgpt
 
-    try:
-        record = chatgpt.login(new_account=args.new_account, open_browser=not args.no_browser)
-    except chatgpt.ChatGPTError as e:
-        print(f"  ✗ {e}", file=sys.stderr)
+    if not sign_in_chatgpt(new_account=args.new_account, open_browser=not args.no_browser):
         sys.exit(1)
-    print(f"  ✓ Signed in to ChatGPT as {record.get('email') or record['subject']}")
-    if not chatgpt.plan_enabled(record):
-        print(
-            "  ⚠ ChatGPT plan usage isn't enabled for this sign-in, so ghst can't use it.\n"
-            "    It needs an eligible plan (Plus or Pro) and permission to use it in ghst.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    config = GhstConfig.load()
-    config.provider.name = "chatgpt"  # api_base_url is kept for switching back
-    models = _probe_directly(config).get("models", [])
-    if models:
-        config.provider.autocomplete_model = _choose_model(
-            models, config.provider.autocomplete_model, "ghost text (pick the fastest)", True
-        )
-        config.provider.model = _choose_model(
-            models, config.provider.model, "Ctrl+G commands", False
-        )
-    else:
-        print("  ⚠ Could not list ChatGPT models; set them with `ghst model set`.")
-    config.write_toml()
-    _send_reload(config)
-
-    if chatgpt.mark_welcomed():
-        print(
-            "\n  You're using your ChatGPT plan\n"
-            "  Eligible usage in ghst uses your ChatGPT plan. Manage usage in your\n"
-            f"  ChatGPT settings: {chatgpt.USAGE_URL}\n"
-        )
-        if sys.stdin.isatty():
-            input("  Press Enter to continue (Got it) ")
-    print(f"  ✓ Using ChatGPT plan (Manage usage: {chatgpt.USAGE_URL})")
-    print(f"    ghost text: {config.provider.effective_autocomplete_model}")
-    print(f"    Ctrl+G:     {config.provider.model}")
+    _run_setup(GhstConfig.load(), "chatgpt")
 
 
 def _cmd_logout(args: argparse.Namespace) -> None:
@@ -709,88 +613,190 @@ def _cmd_logout(args: argparse.Namespace) -> None:
 
 # ── Help command ─────────────────────────────────────────────────────────────
 
+_B, _D, _C, _R = "\x1b[1m", "\x1b[2m", "\x1b[36m", "\x1b[0m"
+
+
+def _style(text: str) -> str:
+    """Bold headings and cyan commands when printing to a terminal."""
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return re.sub(r"\{[bcd/]\}", "", text)
+    return (
+        text.replace("{b}", _B).replace("{c}", _C).replace("{d}", _D).replace("{/}", _R)
+    )
+
+
 HELP_TEXT = """\
-  ghst — AI-powered shell plugin
+  {b}ghst{/} — AI ghost-text autocomplete for zsh
 
-  Features:
-    Autocomplete       Ghost text suggestions as you type (Tab/→ to accept)
-    NL Commands        Ctrl+G → describe in English → get a command
-    Error Correction   Automatic fix suggestions after failed commands
-    History Search     Ctrl+R → search history in plain English
-    Cheat Sheet        Ctrl+/ → show shortcuts at the prompt
+  {b}Get started{/}
+    {c}ghst provider{/}             Choose a provider and connect: a local server
+                              (oMLX, Ollama), your ChatGPT plan, OpenAI or Anthropic
+    {c}ghst login{/}                Sign in with ChatGPT and use your plan
+    {c}ghst status{/}               Check the daemon, the server and your account
+    Then add {c}eval "$(ghst shell-init zsh)"{/} to ~/.zshrc and open a new tab.
 
-  Commands:
-    ghst init                 Setup wizard (re-run to reconfigure)
-    ghst status               Daemon health, provider, models, uptime
-    ghst model [set]          Show or change models
-    ghst provider [set]       Show or change LLM provider
-    ghst login | logout       Sign in with ChatGPT to use your ChatGPT plan
-    ghst set <key> <value>    Change a config value
-    ghst get <key>            Show a config value
-    ghst reset <key>          Reset a config key to default
-    ghst defaults             Show all settings with defaults
-    ghst config               Edit config file in $EDITOR
-    ghst start | stop         Manage daemon
-    ghst help                 This screen
+  {b}Models{/}
+    {c}ghst model{/}                Pick the ghost-text and Ctrl+G models from a list
+    {c}ghst model list{/}           Show the models the server offers
+    {c}ghst model set <name>{/}     Set both models ({c}--autocomplete{/} or {c}--nl{/} for one)
 
-  Run `ghst help <command>` for details on any command.
+  {b}Settings{/}
+    {c}ghst help settings{/}        Every setting, what it does, and its value
+    {c}ghst set <key> <value>{/}    Change one   {d}e.g. ghst set autocomplete_delay_ms 80{/}
+    {c}ghst get <key>{/} · {c}ghst reset <key>{/} · {c}ghst config{/} (open the file)
+
+  {b}Account{/}
+    {c}ghst login{/} · {c}ghst logout{/}  ChatGPT sign-in ({c}--new-account{/}, {c}--no-browser{/})
+
+  {b}Daemon{/}
+    {c}ghst start{/} · {c}ghst stop{/}    Usually automatic; the shell starts it
+
+  {b}At the prompt{/}
+    Tab / →   accept the suggestion       Shift+→   accept one word
+    Esc       dismiss                     Ctrl+G    describe a command in English
+    Ctrl+Z    undo a generated command    Ctrl+/    cheat sheet
+
+  {d}ghst help <command> for details. Config: ~/.config/ghst/config.toml{/}
 """
 
 HELP_COMMANDS: dict[str, str] = {
-    "init": (
-        "  ghst init\n\n  Interactive setup wizard. Detects your shell,\n"
-        "  prompts for LLM provider and API key, writes config,\n"
-        "  and verifies the connection. Safe to re-run."
-    ),
-    "start": (
-        "  ghst start [--quiet]\n\n  Start the background daemon.\n"
-        "  Auto-starts on first use via shell-init."
-    ),
-    "stop": "  ghst stop\n\n  Stop the background daemon.",
-    "status": (
-        "  ghst status\n\n  Show daemon health: running state, PID,\n"
-        "  uptime, provider, models, connection quality."
-    ),
-    "model": (
-        "  ghst model\n  ghst model set <model>\n"
-        "  ghst model set --autocomplete <model>\n"
-        "  ghst model set --nl <model>\n\n"
-        "  Show or change models. Without flags, sets both."
-    ),
-    "provider": (
-        "  ghst provider\n  ghst provider set <name>\n\n"
-        "  Show or switch provider (openai, anthropic).\n"
-        "  Prompts for API key and models when switching."
-    ),
-    "set": (
-        "  ghst set <key> <value>\n\n  Set any config value.\n"
-        "  Example: ghst set autocomplete_delay_ms 300\n\n"
-        "  Run `ghst defaults` to see available keys."
-    ),
-    "get": "  ghst get <key>\n\n  Show current and default value of a config key.",
-    "reset": "  ghst reset <key>\n\n  Reset a config key to its default value.",
-    "defaults": "  ghst defaults\n\n  Show all config keys with current and default values.",
-    "config": "  ghst config\n\n  Open ~/.config/ghst/config.toml in $EDITOR.",
+    "provider": """\
+  {c}ghst provider{/}
+  {c}ghst provider set <local|chatgpt|openai|anthropic>{/}
+
+  Choose where ghost text comes from, connect to it, then pick models from
+  the server's list. ghst remembers each provider's settings, so switching
+  back later doesn't ask for the key again.
+
+    {b}local{/}      Any OpenAI-compatible server. Defaults to oMLX on
+               http://localhost:8000/v1 and can reuse oMLX's own API key.
+               For Ollama use http://localhost:11434/v1.
+    {b}chatgpt{/}    Sign in with ChatGPT; requests use your Plus or Pro plan.
+    {b}openai{/}     OpenAI API key, billed per token.
+    {b}anthropic{/}  Anthropic API key, billed per token.
+
+  At the end it sends one real ghost-text request and shows how long it took.""",
+    "model": """\
+  {c}ghst model{/}                       pick both models from a list
+  {c}ghst model list{/}                  show what the server offers (* = in use)
+  {c}ghst model set <name>{/}            set both
+  {c}ghst model set --autocomplete <name>{/}
+  {c}ghst model set --nl <name>{/}
+
+  The ghost-text model runs on every pause in typing, so pick the fastest one
+  that gives good suggestions. The Ctrl+G model turns English into commands
+  and can be larger.""",
+    "login": """\
+  {c}ghst login{/} [{c}--new-account{/}] [{c}--no-browser{/}]
+
+  Opens "Continue with ChatGPT" in your browser, then switches ghst to your
+  ChatGPT plan and lets you pick models. Requests count against your plan's
+  shared allowance; see or cap ghst's share at chatgpt.com/settings/usage.
+  {c}--new-account{/} signs in to a different ChatGPT account.
+  {c}--no-browser{/} prints the sign-in URL instead of opening it.""",
+    "logout": """\
+  {c}ghst logout{/}
+
+  Revokes the ChatGPT sign-in and deletes its tokens from this machine.""",
+    "status": """\
+  {c}ghst status{/}
+
+  Shows whether the daemon runs, which provider and model are in use, whether
+  the server answers and accepts the key, the ChatGPT account and plan, and
+  the last request error.""",
+    "init": """\
+  {c}ghst init{/}
+
+  First-time setup: adds the shell line to ~/.zshrc, runs {c}ghst provider{/}
+  and starts the daemon. Safe to re-run; other settings are kept.""",
+    "set": """\
+  {c}ghst set <key> <value>{/}
+
+  Change one setting; the daemon picks it up at once. New shells pick up
+  delay, hotkey and history settings. See {c}ghst help settings{/}.""",
+    "get": "  {c}ghst get <key>{/}\n\n  Show a setting's value and default.",
+    "reset": "  {c}ghst reset <key>{/}\n\n  Put a setting back to its default.",
+    "defaults": "  {c}ghst defaults{/}\n\n  List every setting with its value and default.",
+    "config": "  {c}ghst config{/}\n\n  Open ~/.config/ghst/config.toml in $EDITOR.",
+    "start": "  {c}ghst start{/} [{c}--quiet{/}]\n\n  Start the background daemon.",
+    "stop": "  {c}ghst stop{/}\n\n  Stop the background daemon.",
 }
+
+SETTINGS_HELP: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Provider (use ghst provider / ghst model)", [
+        ("provider", "openai (OpenAI API or a local server), anthropic, or chatgpt"),
+        ("api_base_url", "server URL, e.g. http://localhost:8000/v1 for oMLX"),
+        ("api_key", "API key (or set GHST_API_KEY)"),
+        ("autocomplete_model", "model for ghost text"),
+        ("model", "model for Ctrl+G"),
+    ]),
+    ("Ghost text", [
+        ("autocomplete_delay_ms", "pause in typing before asking for a suggestion"),
+        ("autocomplete_delay_short_ms", "shorter pause once the line is long"),
+        ("autocomplete_delay_threshold", "line length that switches to the shorter pause"),
+        ("autocomplete_min_chars", "characters typed before suggestions start"),
+        ("autocomplete_max_tokens", "longest suggestion, in tokens"),
+        ("autocomplete_timeout_ms", "give up on a suggestion after this long"),
+        ("ghost_color", "ghost text colour: 256-colour index or #rrggbb"),
+    ]),
+    ("History", [
+        ("history_source", "past commands from: auto, atuin, zsh, or off"),
+        ("history_match_limit", "how many past commands to use"),
+        ("instant_history", "show the best past command before the model answers"),
+    ]),
+    ("Hotkeys (zsh notation, e.g. ^G; empty = unbound)", [
+        ("nl_hotkey", "describe a command in English"),
+        ("history_search_hotkey", "search history in English"),
+        ("cheat_sheet_hotkey", "show the cheat sheet"),
+    ]),
+    ("Limits and colours", [
+        ("rate_limit_rpm", "most model requests per minute"),
+        ("accent_color", "colour of ghst prompts"),
+        ("success_color", "colour of ✓"),
+        ("warning_color", "colour of ⚠"),
+        ("error_color", "colour of ✗"),
+    ]),
+]
+
+
+def _print_settings_help() -> None:
+    config = GhstConfig.load()
+    out = ["  {b}Settings{/}  {d}change with: ghst set <key> <value>{/}"]
+    for heading, keys in SETTINGS_HELP:
+        out.append(f"\n  {{b}}{heading}{{/}}")
+        for key, text in keys:
+            value = config.get_flat(key)
+            if key == "api_key" and value:
+                value = f"…{str(value)[-4:]}"
+            shown = "" if value in ("", None) else f"  {{d}}= {value}{{/}}"
+            out.append(f"    {{c}}{key:<30}{{/}}{text}{shown}")
+    print(_style("\n".join(out)))
 
 
 def _cmd_help(args: argparse.Namespace) -> None:
     """Handle `ghst help [command]`."""
     command = getattr(args, "help_command", None)
-    if command and command in HELP_COMMANDS:
-        print(HELP_COMMANDS[command])
+    if command == "settings":
+        _print_settings_help()
+    elif command in HELP_COMMANDS:
+        print(_style(HELP_COMMANDS[command]))
     elif command:
-        print(f"  ghst: unknown command '{command}'")
-        print("  Run `ghst help` to see all commands.")
+        print(f"  ghst: unknown command '{command}'. Run `ghst help` to see them all.")
+        sys.exit(1)
     else:
-        print(HELP_TEXT)
+        print(_style(HELP_TEXT))
 
 
 def main(argv: list[str] | None = None) -> None:
     """Main CLI entry point."""
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] in (["-h"], ["--help"]):
+        argv = ["help"]
+    elif len(argv) >= 2 and argv[1] in ("-h", "--help") and argv[0] in HELP_COMMANDS:
+        argv = ["help", argv[0]]
     parser = argparse.ArgumentParser(
         prog="ghst",
-        description="AI-powered shell plugin",
+        description="AI ghost-text autocomplete for zsh",
     )
     subparsers = parser.add_subparsers(dest="command")
 

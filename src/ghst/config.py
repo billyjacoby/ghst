@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -98,6 +98,15 @@ class UIConfig:
 
 
 HISTORY_SOURCES = ("auto", "atuin", "zsh", "off")
+OPENAI_API_BASE = "https://api.openai.com/v1"
+
+
+def profile_id(provider: ProviderConfig) -> str:
+    """Which saved profile a provider config belongs to: local, openai, anthropic, chatgpt."""
+    if provider.name in ("chatgpt", "anthropic"):
+        return provider.name
+    base = provider.api_base_url.rstrip("/")
+    return "local" if base and base != OPENAI_API_BASE else "openai"
 
 
 def resolve_history_source(value: str) -> str:
@@ -114,6 +123,8 @@ class GhstConfig:
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     config_path: Path = field(default_factory=_default_config_path)
+    # Last settings used with each provider, so switching back restores them
+    profiles: dict[str, ProviderConfig] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> GhstConfig:
@@ -131,13 +142,11 @@ class GhstConfig:
         provider_raw = raw.get("provider", {})
         ui_raw = raw.get("ui", {})
 
-        provider = ProviderConfig(
-            name=provider_raw.get("name", "openai"),
-            api_key=provider_raw.get("api_key", ""),
-            api_base_url=provider_raw.get("api_base_url", ""),
-            model=provider_raw.get("model", "gpt-4o"),
-            autocomplete_model=provider_raw.get("autocomplete_model", ""),
-        )
+        provider = cls._provider_from(provider_raw)
+        profiles = {
+            pid: cls._provider_from(table)
+            for pid, table in raw.get("profiles", {}).items() if isinstance(table, dict)
+        }
 
         # Env var override for API key (highest priority)
         env_key = os.environ.get("GHST_API_KEY")
@@ -147,7 +156,21 @@ class GhstConfig:
         known = {f.name for f in fields(UIConfig)}
         ui = UIConfig(**{k: v for k, v in ui_raw.items() if k in known})
 
-        return cls(provider=provider, ui=ui, config_path=config_path)
+        return cls(provider=provider, ui=ui, config_path=config_path, profiles=profiles)
+
+    @staticmethod
+    def _provider_from(raw: dict[str, Any]) -> ProviderConfig:
+        return ProviderConfig(
+            name=raw.get("name", "openai"),
+            api_key=raw.get("api_key", ""),
+            api_base_url=raw.get("api_base_url", ""),
+            model=raw.get("model", "gpt-4o"),
+            autocomplete_model=raw.get("autocomplete_model", ""),
+        )
+
+    def save_profile(self) -> None:
+        """Remember the active provider's settings under its profile."""
+        self.profiles[profile_id(self.provider)] = replace(self.provider)
 
     # Map of flat key names to (section, field) for set/get/reset
     FLAT_KEYS: ClassVar[dict[str, tuple[str, str]]] = {
@@ -214,15 +237,21 @@ class GhstConfig:
         target.parent.mkdir(parents=True, exist_ok=True)
         esc = self._toml_escape
 
-        lines = ['[provider]']
-        lines.append(f'name = "{esc(self.provider.name)}"')
-        if self.provider.api_key:
-            lines.append(f'api_key = "{esc(self.provider.api_key)}"')
-        if self.provider.api_base_url:
-            lines.append(f'api_base_url = "{esc(self.provider.api_base_url)}"')
-        lines.append(f'model = "{esc(self.provider.model)}"')
-        if self.provider.autocomplete_model:
-            lines.append(f'autocomplete_model = "{esc(self.provider.autocomplete_model)}"')
+        env_key = os.environ.get("GHST_API_KEY", "")
+
+        def provider_lines(provider: ProviderConfig) -> list[str]:
+            out = [f'name = "{esc(provider.name)}"']
+            # A key from GHST_API_KEY stays in the environment, not the file
+            if provider.api_key and provider.api_key != env_key:
+                out.append(f'api_key = "{esc(provider.api_key)}"')
+            if provider.api_base_url:
+                out.append(f'api_base_url = "{esc(provider.api_base_url)}"')
+            out.append(f'model = "{esc(provider.model)}"')
+            if provider.autocomplete_model:
+                out.append(f'autocomplete_model = "{esc(provider.autocomplete_model)}"')
+            return out
+
+        lines = ['[provider]', *provider_lines(self.provider)]
 
         lines.append('')
         lines.append('[ui]')
@@ -241,8 +270,12 @@ class GhstConfig:
                 items = ", ".join(f'"{esc(str(v))}"' for v in value)
                 lines.append(f"{f.name} = [{items}]")
 
+        for pid, provider in sorted(self.profiles.items()):
+            lines += ['', f'[profiles.{pid}]', *provider_lines(provider)]
+
         lines.append('')
         target.write_text('\n'.join(lines), encoding='utf-8')
+        target.chmod(0o600)  # holds API keys
 
     def set_value(self, key: str, value: str) -> bool:
         """Set a config value by flat key and save to disk.

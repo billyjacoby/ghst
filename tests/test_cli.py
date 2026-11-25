@@ -39,16 +39,34 @@ class TestHelp:
     def test_help_shows_features(self, capsys: object) -> None:
         main(["help"])
         captured = capsys.readouterr()  # type: ignore[attr-defined]
-        assert "Autocomplete" in captured.out
+        assert "ghst provider" in captured.out
+        assert "ghst login" in captured.out
         assert "Ctrl+G" in captured.out
+        assert "\x1b[" not in captured.out  # no colours when not a terminal
 
     def test_help_specific_command(self, capsys: object) -> None:
         main(["help", "init"])
         captured = capsys.readouterr()  # type: ignore[attr-defined]
-        assert "wizard" in captured.out.lower()
+        assert "first-time setup" in captured.out.lower()
+
+    def test_dash_h_shows_command_help(self, capsys: object) -> None:
+        main(["provider", "-h"])
+        captured = capsys.readouterr()  # type: ignore[attr-defined]
+        assert "oMLX" in captured.out
+
+    def test_help_settings_lists_keys(self, capsys: object, tmp_path: Path) -> None:
+        config = GhstConfig()
+        config.provider.api_key = "secret-1234"
+        with patch("ghst.cli.GhstConfig.load", return_value=config):
+            main(["help", "settings"])
+        out = capsys.readouterr().out  # type: ignore[attr-defined]
+        for key in ("autocomplete_delay_ms", "history_source", "nl_hotkey"):
+            assert key in out
+        assert "secret" not in out and "…1234" in out
 
     def test_help_unknown_command(self, capsys: object) -> None:
-        main(["help", "nonexistent"])
+        with pytest.raises(SystemExit):
+            main(["help", "nonexistent"])
         captured = capsys.readouterr()  # type: ignore[attr-defined]
         assert "unknown" in captured.out.lower()
 

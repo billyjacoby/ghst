@@ -31,6 +31,8 @@ src/ghst/
   config.py      – ~/.config/ghst/config.toml parsing, defaults, env var override
   daemon.py      – asyncio socket server, request routing, session buffer, rate limiting, idle timeout
   llm.py         – async LLM client (OpenAI, Anthropic, ChatGPT plan), circuit breaker, caching
+  setup.py       – interactive provider/model setup (ghst provider, ghst model, ghst login)
+  picker.py      – dependency-free arrow-key picker with type-to-filter; numbered fallback
   chatgpt.py     – Sign in with ChatGPT: loopback OAuth + PKCE, token refresh, Responses API streaming
   prompts.py     – system/user prompt templates for all request types
   context.py     – cwd/git/env/project-type context gathering & caching
@@ -61,7 +63,7 @@ tests/
 
 ### Configuration (`~/.config/ghst/config.toml`)
 
-Key sections: `[provider]` (name, api_key, api_base_url, model, autocomplete_model) and `[ui]` (delays, hotkeys, feature toggles). Supports OpenAI and Anthropic.
+Key sections: `[provider]` (name, api_key, api_base_url, model, autocomplete_model), `[ui]` (delays, hotkeys, feature toggles) and `[profiles.<local|openai|anthropic|chatgpt>]` (the last provider settings used with each, restored when switching back). `profile_id()` derives the profile: `openai` with a non-OpenAI `api_base_url` is `local`. The file is written owner-only, and a key from `GHST_API_KEY` is never written to it.
 
 ## Development Commands
 
