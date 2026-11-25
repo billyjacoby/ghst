@@ -3,7 +3,7 @@
 ## Scenario 1: Empty prompt, simple request
 
 ```
-# User is at a normal zsh prompt, presses Ctrl+G
+# User is at a normal zsh prompt, presses Cmd+I (or Ctrl+G)
 $ █
 
 # Prompt changes to an inline NL input
@@ -12,7 +12,7 @@ ghst> █
 # User types their intent in plain English
 ghst> find all python files larger than 1mb modified in the last week█
 
-# User presses Enter — spinner appears
+# User presses Enter — "thinking…" appears below the line
 ghst> find all python files larger than 1mb modified in the last week
   ⠋ thinking...
 
@@ -33,7 +33,7 @@ $ find . -name "*.py" -size +1M -mtime -7█
 # User started typing but isn't sure of the flags
 $ docker run -v █
 
-# Presses Ctrl+G — existing buffer is preserved as context
+# Presses Cmd+I — existing buffer is preserved as context
 ghst> (docker run -v ...) mount current dir as /app and run node█
 
 # Enter → thinking...
@@ -52,7 +52,7 @@ $ docker run -v $(pwd):/app -w /app node:20 node█
 $ awk '{print $3}' access.log | sort | uniq -c | sort -rn | head -20█
 
 # User thinks "close but I want IPs only from today"
-# Presses Ctrl+G again
+# Presses Cmd+I again
 ghst> (awk '{print $3}' ...) only include lines from today's date█
 
 # LLM refines the existing command:
@@ -62,7 +62,7 @@ $ grep "$(date +%d/%b/%Y)" access.log | awk '{print $3}' | sort | uniq -c | sort
 ## What happens under the hood
 
 ```
-Keystroke (Ctrl+G)
+Keystroke (Cmd+I or Ctrl+G; nl_hotkey)
   │
   ▼
 ZLE widget activates
@@ -86,7 +86,7 @@ ZLE widget activates
   }
         │
         ▼
-  Shows spinner in $POSTDISPLAY via zle -F (non-blocking)
+  Shows "thinking…" with zle -M (zle's own message line)
         │
         ▼
   Daemon receives request
@@ -114,12 +114,12 @@ ZLE widget activates
 | Ctrl+Z undo | Restore original `$BUFFER` | Easy to bail out |
 | Timeout | 15s total (2s connect + 12s read) | NL commands are more complex, user expects a pause |
 | Retry | 1 retry with 500ms delay | User is waiting explicitly — cover transient blips |
-| Spinner | `$POSTDISPLAY` with `zle -F` | Non-blocking, disappears cleanly |
+| Progress | "thinking…" via `zle -M` | Drawing a spinner on /dev/tty made zle redraw the prompt in the wrong place |
 | Visual indicator | Brief color flash on generated command | Makes it obvious this wasn't typed |
 
 ## Edge cases
 
-- **Empty NL input** (user presses Ctrl+G then Enter with no text) → cancel, restore buffer
+- **Empty NL input** (user presses Cmd+I then Enter with no text) → cancel, restore buffer
 - **LLM returns empty** (unsure/unsafe) → show "Couldn't generate a command" briefly, restore buffer
 - **Daemon unreachable** → show "ghst: daemon not running, start with `ghst start`", restore buffer
 - **Timeout** → show "ghst: timed out", restore buffer

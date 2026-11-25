@@ -60,7 +60,7 @@ __ghst_json_str() {
 __ghst_send_request() {
     local buffer="$1" cursor_pos="$2"
 
-    [[ -S "$__GHST_SOCKET" ]] || return 1
+    [[ -S "$__GHST_SOCKET" ]] || { __ghst_restart_daemon; return 1; }
 
     # Build the JSON request in pure zsh (no subprocess per request)
     local -a hist parts
@@ -99,6 +99,7 @@ __ghst_send_request() {
     # Connect via zsh native socket
     zmodload zsh/net/socket 2>/dev/null || return 1
     if ! zsocket "$__GHST_SOCKET" 2>/dev/null; then
+        __ghst_restart_daemon  # socket file left by a daemon that died
         return 1
     fi
     __GHST_RESPONSE_FD=$REPLY

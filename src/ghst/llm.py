@@ -189,8 +189,12 @@ class LLMClient:
         timeout: httpx.Timeout = TIMEOUT_AUTOCOMPLETE,
         use_cache_key: tuple[str, ...] | None = None,
         single_line: bool = False,
+        fim_prompt: str = "",
     ) -> str:
         """Send a completion request to the LLM.
+
+        With fim_prompt, send that raw text to /completions instead of
+        messages to /chat/completions (fill-in-the-middle on a base model).
 
         Args:
             messages: Chat messages (system/user/assistant).
@@ -216,7 +220,9 @@ class LLMClient:
         start = time.monotonic()
 
         try:
-            if self._is_anthropic():
+            if fim_prompt:
+                result = await self._complete_fim(fim_prompt, model, timeout)
+            elif self._is_anthropic():
                 result = await self._complete_anthropic(messages, model, timeout, single_line)
             elif self._is_chatgpt():
                 result = await self._complete_chatgpt(messages, model, timeout, single_line)
@@ -322,6 +328,23 @@ class LLMClient:
         response.raise_for_status()
         data = response.json()
         return data["content"][0]["text"].strip()
+
+    async def _complete_fim(self, prompt: str, model: str, timeout: httpx.Timeout) -> str:
+        from ghst.prompts import FIM_STOP
+
+        client = await self._get_client()
+        base_url = self.config.provider.effective_api_base_url.rstrip("/")
+        response = await client.post(
+            f"{base_url}/completions",
+            json={
+                "model": model, "prompt": prompt, "temperature": 0,
+                "max_tokens": self.config.ui.autocomplete_max_tokens, "stop": FIM_STOP,
+            },
+            headers={"Authorization": f"Bearer {self.config.provider.api_key}"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["text"].rstrip()
 
     async def _complete_chatgpt(
         self,

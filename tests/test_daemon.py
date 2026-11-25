@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from ghst.config import GhstConfig
@@ -150,3 +153,46 @@ async def test_health_reports_unreachable_server(tmp_path) -> None:  # noqa: ANN
     assert result["type"] == "health"
     assert result["ok"] is False
     assert result["error"] == "cannot connect"
+
+
+async def test_single_instance_and_clean_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import shutil
+    import tempfile
+
+    # Unix socket paths are limited to ~104 bytes, so pytest's tmp_path is too long
+    runtime = tempfile.mkdtemp(prefix="ghst", dir="/tmp")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", runtime)
+    config = GhstConfig(config_path=tmp_path / "config.toml")
+    first = GhstDaemon(config)
+    running = asyncio.create_task(first.start())
+    for _ in range(100):
+        if config.get_pid_path().exists() or running.done():
+            break
+        await asyncio.sleep(0.01)
+    assert not running.done(), running.exception()
+    assert config.get_pid_path().read_text() == str(os.getpid())
+
+    # A second daemon gives up and leaves the first one's files alone
+    await asyncio.wait_for(GhstDaemon(config).start(), timeout=2)
+    assert config.get_socket_path().exists()
+
+    # stop() makes start() return, so the process can exit
+    await first.stop()
+    await asyncio.wait_for(running, timeout=2)
+    assert not config.get_socket_path().exists()
+    assert not config.get_pid_path().exists()
+    shutil.rmtree(runtime)
+
+
+async def test_nl_command_strips_markdown_fence(tmp_path: Path) -> None:
+    daemon = GhstDaemon(GhstConfig(config_path=tmp_path / "config.toml"))
+
+    async def fenced(*_args: object, **_kwargs: object) -> str:
+        return "```bash\ndu -sh .\n```"
+
+    daemon.llm.complete_with_retry = fenced  # type: ignore[method-assign]
+    result = await daemon.handle_request({"type": "nl", "prompt": "disk usage"})
+    assert result["command"] == "du -sh ."

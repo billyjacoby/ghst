@@ -167,11 +167,32 @@ def _cmd_start(args: argparse.Namespace) -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-
-    pid_path.write_text(str(proc.pid))
+    # The daemon writes its own pid file once it holds the single-instance
+    # lock; a second daemon started at the same moment just exits
+    for _ in range(40):
+        if socket_path.exists() or proc.poll() is not None:
+            break
+        time.sleep(0.05)
 
     if not getattr(args, "quiet", False):
         print(f"ghst: daemon started (pid {proc.pid})")
+
+
+def _terminate(pid: int) -> bool:
+    """SIGTERM the daemon and wait for it to exit, so an immediate restart
+    isn't refused by its lock. Returns False if it wasn't running."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    try:
+        for _ in range(60):
+            time.sleep(0.1)
+            os.kill(pid, 0)
+        os.kill(pid, signal.SIGKILL)  # still alive after 6s
+    except ProcessLookupError:
+        pass
+    return True
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
@@ -186,12 +207,13 @@ def _cmd_stop(args: argparse.Namespace) -> None:
 
     try:
         pid = int(pid_path.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        print(f"ghst: daemon stopped (pid {pid})")
-    except ProcessLookupError:
-        print("ghst: daemon not running (stale pid file)")
     except ValueError:
         print("ghst: invalid pid file")
+        pid = 0
+    if pid and _terminate(pid):
+        print(f"ghst: daemon stopped (pid {pid})")
+    elif pid:
+        print("ghst: daemon not running (stale pid file)")
 
     pid_path.unlink(missing_ok=True)
     socket_path.unlink(missing_ok=True)
@@ -384,7 +406,7 @@ def _cmd_init(args: argparse.Namespace) -> None:
 
     print("\n  You're all set! Open a new shell and start typing.\n")
     print("    → Autocomplete appears as ghost text (accept with Tab or →)")
-    print("    → Press Ctrl+G for natural language command mode")
+    print("    → Press Cmd+I (or Ctrl+G) to describe a command in English")
     print("    → Press Ctrl+R to search history in plain English")
     print("    → Run `ghst status` to check daemon health")
     print("    → Run `ghst help` for all commands\n")
@@ -495,7 +517,7 @@ def _cmd_model(args: argparse.Namespace) -> None:
     config = GhstConfig.load()
     if not sys.stdin.isatty():
         print(f"  ghost text: {config.provider.effective_autocomplete_model}")
-        print(f"  Ctrl+G:     {config.provider.model}")
+        print(f"  Cmd+I:      {config.provider.model}")
         return
     from ghst.setup import choose_models, report
 
@@ -636,7 +658,7 @@ HELP_TEXT = """\
     Then add {c}eval "$(ghst shell-init zsh)"{/} to ~/.zshrc and open a new tab.
 
   {b}Models{/}
-    {c}ghst model{/}                Pick the ghost-text and Ctrl+G models from a list
+    {c}ghst model{/}                Pick the ghost-text and Cmd+I models from a list
     {c}ghst model list{/}           Show the models the server offers
     {c}ghst model set <name>{/}     Set both models ({c}--autocomplete{/} or {c}--nl{/} for one)
 
@@ -653,7 +675,8 @@ HELP_TEXT = """\
 
   {b}At the prompt{/}
     Tab / →   accept the suggestion       Shift+→   accept one word
-    Esc       dismiss                     Ctrl+G    describe a command in English
+    Esc       dismiss                     Cmd+I     describe a command in English
+                                          {d}(Ctrl+G too, where the terminal doesn't take it){/}
     Ctrl+Z    undo a generated command    Ctrl+/    cheat sheet
 
   {d}ghst help <command> for details. Config: ~/.config/ghst/config.toml{/}
@@ -671,6 +694,9 @@ HELP_COMMANDS: dict[str, str] = {
     {b}local{/}      Any OpenAI-compatible server. Defaults to oMLX on
                http://localhost:8000/v1 and can reuse oMLX's own API key.
                For Ollama use http://localhost:11434/v1.
+               Recommended models: ghost text Qwen2.5-Coder-1.5B-4bit (the
+               base model, not -Instruct; ghst uses fill-in-the-middle for it),
+               Cmd+I Qwen3-Coder-30B-A3B-Instruct-8bit.
     {b}chatgpt{/}    Sign in with ChatGPT; requests use your Plus or Pro plan.
     {b}openai{/}     OpenAI API key, billed per token.
     {b}anthropic{/}  Anthropic API key, billed per token.
@@ -684,8 +710,9 @@ HELP_COMMANDS: dict[str, str] = {
   {c}ghst model set --nl <name>{/}
 
   The ghost-text model runs on every pause in typing, so pick the fastest one
-  that gives good suggestions. The Ctrl+G model turns English into commands
-  and can be larger.""",
+  that gives good suggestions. On a local server a base coder model such as
+  Qwen2.5-Coder-1.5B-4bit is best: ghst sends it fill-in-the-middle prompts.
+  The Cmd+I model turns English into commands and can be larger.""",
     "login": """\
   {c}ghst login{/} [{c}--new-account{/}] [{c}--no-browser{/}]
 
@@ -728,13 +755,14 @@ SETTINGS_HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("api_base_url", "server URL, e.g. http://localhost:8000/v1 for oMLX"),
         ("api_key", "API key (or set GHST_API_KEY)"),
         ("autocomplete_model", "model for ghost text"),
-        ("model", "model for Ctrl+G"),
+        ("model", "model for Cmd+I (plain English to command)"),
     ]),
     ("Ghost text", [
         ("autocomplete_delay_ms", "pause in typing before asking for a suggestion"),
         ("autocomplete_delay_short_ms", "shorter pause once the line is long"),
         ("autocomplete_delay_threshold", "line length that switches to the shorter pause"),
         ("autocomplete_min_chars", "characters typed before suggestions start"),
+        ("autocomplete_mode", "auto, chat, or fim (fill-in-the-middle for base coder models)"),
         ("autocomplete_max_tokens", "longest suggestion, in tokens"),
         ("autocomplete_timeout_ms", "give up on a suggestion after this long"),
         ("ghost_color", "ghost text colour: 256-colour index or #rrggbb"),
@@ -745,7 +773,7 @@ SETTINGS_HELP: list[tuple[str, list[tuple[str, str]]]] = [
         ("instant_history", "show the best past command before the model answers"),
     ]),
     ("Hotkeys (zsh notation, e.g. ^G; empty = unbound)", [
-        ("nl_hotkey", "describe a command in English"),
+        ("nl_hotkey", "describe a command in English (space-separated keys)"),
         ("history_search_hotkey", "search history in English"),
         ("cheat_sheet_hotkey", "show the cheat sheet"),
     ]),

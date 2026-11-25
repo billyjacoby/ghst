@@ -26,6 +26,7 @@ __ghst_get_history() {
 __ghst_request() {
     local json="$1"
     local timeout="${2:-10}"
+    [[ -S "$__GHST_SOCKET" ]] || { __ghst_restart_daemon; return 1; }
     if command -v socat &>/dev/null; then
         echo "$json" | socat -T "$timeout" - UNIX-CONNECT:"$__GHST_SOCKET" 2>/dev/null
     else
@@ -49,9 +50,20 @@ finally: s.close()
     fi
 }
 
+# Start the daemon again if it went away (idle timeout, crash, upgrade).
+# Rate-limited so a broken install doesn't spawn a process per keystroke.
+typeset -gi __GHST_LAST_RESTART=0
+__ghst_restart_daemon() {
+    zmodload -F zsh/datetime p:EPOCHSECONDS 2>/dev/null
+    (( EPOCHSECONDS - __GHST_LAST_RESTART < 10 )) && return
+    __GHST_LAST_RESTART=$EPOCHSECONDS
+    ghst start --quiet </dev/null &>/dev/null &!
+}
+
 # ── preexec hook — record last command ────────────────────────────────────────
 __ghst_preexec() {
     __GHST_LAST_CMD="$1"
+    __GHST_CAN_UNDO=0  # Ctrl+Z only undoes a generated command not yet run
 }
 
 # ── precmd hook — record exit status ─────────────────────────────────────────
@@ -95,7 +107,8 @@ __ghst_cheat_sheet() {
   │  Tab / →     Accept autocomplete        │
   │  Shift+→     Accept one word            │
   │  Esc         Dismiss suggestion         │
-  │  Ctrl+G      Natural language command   │
+  │  Cmd+I       Natural language command   │
+  │  (or Ctrl+G) describe it in English     │
   │  Ctrl+Z      Undo generated command     │
   │  Ctrl+/      This cheat sheet           │
   │                                         │

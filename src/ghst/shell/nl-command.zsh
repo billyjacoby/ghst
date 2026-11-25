@@ -1,12 +1,12 @@
-# nl-command.zsh — Natural language command construction (Ctrl+G)
+# nl-command.zsh — Natural language command construction (Cmd+I / Ctrl+G)
 #
 # Opens an inline prompt where the user describes what they want in English.
 # The LLM generates a shell command and places it in the buffer for review.
 
 # ── Undo state ──────────────────────────────────────────────────────────────
 typeset -g __GHST_SAVED_BUFFER=""
+typeset -gi __GHST_CAN_UNDO=0  # a flag: the saved line may be empty
 typeset -gi __GHST_SAVED_CURSOR=0
-typeset -gi __GHST_STATUS_SHOWN=0
 
 # ── Colors (configurable via config.toml, fallback to ANSI defaults) ────────
 typeset -g __GHST_C_ACCENT=$'\e[36m'
@@ -20,51 +20,13 @@ typeset -g __GHST_C_RESET=$'\e[0m'
 [[ -n "$__GHST_WARNING_ESC" ]] && __GHST_C_WARNING="$__GHST_WARNING_ESC"
 [[ -n "$__GHST_ERROR_ESC" ]]   && __GHST_C_ERROR="$__GHST_ERROR_ESC"
 
-# ── Spinner ─────────────────────────────────────────────────────────────────
-typeset -g __GHST_SPINNER_PID=0
-
-__ghst_start_spinner() {
-    local label="${1:-thinking}"
-    (
-        trap 'printf "\r\e[2K" > /dev/tty; exit 0' TERM INT
-        local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-        local i=0
-        while true; do
-            printf '\r  %s %s %s%s%s' \
-                "${__GHST_C_ACCENT}" "${frames[$((i % 10 + 1))]}" \
-                "${__GHST_C_DIM}${label}...${__GHST_C_RESET}" \
-                "" "" > /dev/tty
-            sleep 0.08
-            (( i++ ))
-        done
-    ) &!
-    __GHST_SPINNER_PID=$!
-}
-
-__ghst_stop_spinner() {
-    if (( __GHST_SPINNER_PID > 0 )); then
-        kill $__GHST_SPINNER_PID 2>/dev/null
-        wait $__GHST_SPINNER_PID 2>/dev/null
-        __GHST_SPINNER_PID=0
-        printf '\r\e[2K' > /dev/tty
-    fi
-}
-
-# Show a colored status message below the prompt via /dev/tty
+# Show a status message below the prompt. zle -M keeps zle's idea of the
+# screen correct (printing a newline to /dev/tty here left the prompt
+# undrawn); it can't show colours, so escape codes are stripped.
 __ghst_show_status() {
-    local msg="$1"
-    # Save cursor, move to next line, print, restore cursor
-    printf '\n\e[2K  %s\e[0m' "$msg" > /dev/tty
-    typeset -g __GHST_STATUS_SHOWN=1
-}
-
-# Clear status message if one was shown
-__ghst_clear_status() {
-    if (( __GHST_STATUS_SHOWN )); then
-        # Move down one line, clear it, move back up
-        printf '\n\e[2K\e[A' > /dev/tty
-        __GHST_STATUS_SHOWN=0
-    fi
+    setopt localoptions extendedglob
+    local msg="${1//$'\e'\[[0-9;]#m/}"
+    zle -M "  $msg"
 }
 
 # Clean up autocomplete state (call after spinner/request completes)
@@ -161,12 +123,12 @@ __ghst_nl_command() {
         return
     fi
 
-    # Clear the NL input line and show spinner
-    printf '\r\e[2K' > /dev/tty
+    # Show progress with zle's own message line. An animated spinner written
+    # to /dev/tty here left zle redrawing the prompt a line too high.
     BUFFER=""
     POSTDISPLAY=""
-    zle reset-prompt
-    __ghst_start_spinner "thinking"
+    zle -M "  thinking…"
+    zle -R
 
     # Build request
     local history_json
@@ -187,8 +149,7 @@ print(json.dumps(history[-10:]))
     local response
     response=$(__ghst_request "$json_request" 15)
 
-    # Stop spinner and clean up stale autocomplete state
-    __ghst_stop_spinner
+    # Clean up stale autocomplete state
     __ghst_cleanup_autocomplete
 
     if [[ -z "$response" ]]; then
@@ -229,6 +190,7 @@ except: pass
 
     # Save for undo (Ctrl+Z)
     __GHST_SAVED_BUFFER="$saved_buffer"
+    __GHST_CAN_UNDO=1
     __GHST_SAVED_CURSOR=$saved_cursor
 
     # Place generated command in buffer
@@ -276,12 +238,11 @@ __ghst_history_search() {
         return
     fi
 
-    # Clear the search input line and show spinner
-    printf '\r\e[2K' > /dev/tty
+    # Show progress with zle's message line (see the Ctrl+G widget)
     BUFFER=""
     POSTDISPLAY=""
-    zle reset-prompt
-    __ghst_start_spinner "searching"
+    zle -M "  searching…"
+    zle -R
 
     # Get history entries (deduplicated)
     local history_json
@@ -306,8 +267,7 @@ print(json.dumps(history[-500:]))
     local response
     response=$(__ghst_request "$json_request" 15)
 
-    # Stop spinner and clean up stale autocomplete state
-    __ghst_stop_spinner
+    # Clean up stale autocomplete state
     __ghst_cleanup_autocomplete
 
     if [[ -z "$response" ]]; then
@@ -334,6 +294,7 @@ except: pass
 
     if [[ -n "$first_cmd" ]]; then
         __GHST_SAVED_BUFFER="$saved_buffer"
+        __GHST_CAN_UNDO=1
         __GHST_SAVED_CURSOR=$saved_cursor
         BUFFER="$first_cmd"
         CURSOR=${#BUFFER}
@@ -350,11 +311,13 @@ zle -N __ghst_history_search
 
 # ── Undo: restore original buffer before NL/history ─────────────────────────
 __ghst_nl_undo() {
-    if [[ -n "$__GHST_SAVED_BUFFER" ]]; then
-        __ghst_clear_status
+    if (( __GHST_CAN_UNDO )); then
+        # zle drops the "Ctrl+Z to undo" message on this keypress by itself;
+        # clearing it with zle -M "" here made zle redraw a line too high
         BUFFER="$__GHST_SAVED_BUFFER"
         CURSOR=$__GHST_SAVED_CURSOR
         __GHST_SAVED_BUFFER=""
+        __GHST_CAN_UNDO=0
         POSTDISPLAY=""
         zle reset-prompt
     else
@@ -365,6 +328,7 @@ zle -N __ghst_nl_undo
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
 # Hotkeys come from the config (nl_hotkey, history_search_hotkey); empty = unbound
-[[ -n "${__GHST_NL_HOTKEY-^G}" ]] && bindkey "${__GHST_NL_HOTKEY-^G}" __ghst_nl_command
+for __ghst_key in ${=__GHST_NL_HOTKEY-^G}; do bindkey "$__ghst_key" __ghst_nl_command; done
+unset __ghst_key
 [[ -n "$__GHST_HISTORY_HOTKEY" ]] && bindkey "$__GHST_HISTORY_HOTKEY" __ghst_history_search
 bindkey '^Z' __ghst_nl_undo           # Ctrl+Z — Undo NL command

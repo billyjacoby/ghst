@@ -116,6 +116,38 @@ def autocomplete_user(
 Complete: {buffer}"""
 
 
+FIM_STOP = ["\n", "<|fim_pad|>", "<|endoftext|>", "<|file_sep|>", "<|fim_prefix|>"]
+
+
+def autocomplete_fim(
+    buffer: str,
+    cwd: str,
+    history: list[str],
+    dir_listing: str = "",
+    git_branch: str = "",
+    history_matches: list[str] | None = None,
+) -> str:
+    """A fill-in-the-middle prompt for base coder models (Qwen2.5-Coder tokens).
+
+    Base models don't follow instructions, so the context is a shell
+    transcript: past commands that match, then recent ones, then the line
+    being typed, which the model continues.
+    """
+    header = [f"# zsh on {_os_info()}, in {cwd}"]
+    if git_branch:
+        header.append(f"# git branch: {git_branch}")
+    if dir_listing:
+        header.append(f"# files: {dir_listing}")
+    lines = list(dict.fromkeys(
+        [m[:200] for m in reversed(history_matches or [])] + [h[:200] for h in history[-5:]]
+    ))
+    transcript = "".join(f"$ {line}\n" for line in lines)
+    return (
+        "<|fim_prefix|>" + "\n".join(header) + "\n" + transcript + f"$ {buffer}"
+        + "<|fim_suffix|>\n<|fim_middle|>"
+    )
+
+
 def proactive_system(session_buffer: str = "") -> str:
     base = COMMAND_SYSTEM
     if session_buffer:

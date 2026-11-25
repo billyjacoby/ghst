@@ -40,7 +40,7 @@ src/ghst/
   shell/
     ghst.zsh           – precmd/preexec hooks, history helper, auto-reload, cheat sheet
     autocomplete.zsh   – ghost text via direct /dev/tty escape codes, zsocket IPC, adaptive debounce
-    nl-command.zsh     – Ctrl+G natural-language widget, history search (optional hotkey), Ctrl+Z undo
+    nl-command.zsh     – Cmd+I / Ctrl+G natural-language widget, history search (optional hotkey), Ctrl+Z undo
 tests/
   test_config.py, test_prompts.py, test_llm.py, test_daemon.py,
   test_safety.py, test_integration.py
@@ -95,7 +95,7 @@ uv run ghst status            # check daemon status
 
 - **Never auto-execute** — all suggestions are shown as editable ghost text
 - **Ghost text via /dev/tty** — POSTDISPLAY doesn't render ANSI escapes on zsh 5.9 macOS. Direct `echo -n '\e[90m'... > /dev/tty` is the only working approach. $BUFFER is empty in plain `zle -F` callbacks, so the autocomplete response handler is registered with `zle -F -w` (as a widget) to see what the user typed since the request.
-- **All colored output via /dev/tty** — POSTDISPLAY cannot render ANSI escape sequences at all on zsh 5.9 macOS. Any colored UI element (status messages, spinners, ghost text) must write directly to `/dev/tty`. POSTDISPLAY should only be used for plain uncolored text.
+- **All colored output via /dev/tty** — POSTDISPLAY cannot render ANSI escape sequences at all on zsh 5.9 macOS. Ghost text is written to `/dev/tty` after the cursor, with the cursor saved and restored around it. Status and progress messages use `zle -M` (plain text) instead; see "Never draw on the prompt line behind zle's back".
 - **ANSI-C quoting in eval** — `$'\e[36m'` does NOT work inside `"${param:-...}"` double-quoted parameter expansion when shell code runs through `eval "$(cmd)"`. Always assign defaults separately: `typeset -g VAR=$'\e[36m'` then `[[ -n "$OVERRIDE" ]] && VAR="$OVERRIDE"`.
 - **PROMPT escape wrapping** — escape sequences in zsh PROMPT must be wrapped in `%{...%}` (e.g. `%{$'\e[36m'%}text%{$'\e[0m'%}`) so ZLE calculates cursor position correctly. Without this, line editing breaks on long inputs.
 - **Configurable UI colors** — all colored UI elements (ghost text, accent, success, warning, error) are configurable via `config.toml`. Colors are converted to escape sequences in `cli.py` and exported as `__GHST_*_ESC` env vars. Shell code sets ANSI defaults then overrides from env vars.
@@ -103,7 +103,7 @@ uv run ghst status            # check daemon status
 - **Shell file inlining** — `shell-init` reads and prints the contents of all .zsh files rather than emitting `source` commands. Avoids path resolution issues with pipx/uv tool installs.
 - **Adaptive debounce** — 100ms base, 50ms when buffer ≥8 chars (configurable; `shell-init` passes the `[ui]` delay, min-chars and hotkey settings to the shell). Timer via `exec {fd}< <(sleep ...)` + `zle -F`.
 - **Circuit breaker** — 3 consecutive failures → 30s cooldown → probe
-- **Idle timeout** — daemon auto-exits after 30 minutes of inactivity
+- **Idle timeout** — daemon auto-exits after 30 minutes of inactivity; the shell restarts it on demand
 - **Rate limiting** — 240 requests/minute by default (`rate_limit_rpm`) to prevent burning API quota
 - **Safety** — dangerous command warnings, secret sanitization before LLM calls
 - **FIM-style autocomplete prompt** — system prompt tells the model to "continue the text from where it left off" (like Tab completion). This avoids spacing/restructuring issues that instruction-following prompts cause.
@@ -116,10 +116,16 @@ uv run ghst status            # check daemon status
 - **Socket liveness probe** — `shell-init` tries `zsocket` connect (not just file existence) to detect stale sockets from crashed daemons
 - **recursive-edit** — NL command and history search use ZLE recursive-edit for full line editing instead of raw `read -r`
 - **Disable autocomplete during recursive-edit** — `__ghst_self_insert` (bound to all printable chars) triggers autocomplete on every keystroke. During NL/history recursive-edit, this sends the user's English text as autocomplete requests, producing garbage responses and stale FDs that interfere after the widget returns. Use `__GHST_AUTOCOMPLETE_DISABLED` flag, set in `__ghst_enter_mode`/`__ghst_exit_mode`.
-- **Clean up autocomplete FDs before and after NL/history** — stale `zle -F` response FDs from before entering NL mode can fire after the widget places its result in BUFFER. The `zle -R` in `__ghst_on_response` redraws and wipes the generated command. Cancel debounce and close response FDs at mode entry AND after the spinner/request completes.
+- **Clean up autocomplete FDs before and after NL/history** — stale `zle -F` response FDs from before entering NL mode can fire after the widget places its result in BUFFER. The `zle -R` in `__ghst_on_response` redraws and wipes the generated command. Cancel debounce and close response FDs at mode entry AND after the request completes.
 - **Never interpolate user data into Python strings** — shell history, user input, and buffer contents must be piped through stdin to `python3` for JSON encoding, or escaped with `__ghst_json_str` (autocomplete builds its requests this way to avoid a subprocess per keystroke). Send with `print -r`: plain `print` rewrites backslashes and breaks the JSON. Direct interpolation into triple-quoted strings (`'''$var'''`) breaks on quotes, backslashes, and special characters, producing invalid JSON.
 - **Close fds as `{ exec {fd}<&- } 2>/dev/null`** — never `exec {fd}<&- 2>/dev/null`. An `exec` with no command makes every redirection on it permanent, so the bare form silently sends the whole shell's stderr to /dev/null. That breaks anything drawing to stderr afterwards, e.g. atuin's search UI fails with "The cursor position could not be read".
+- **Never draw on the prompt line behind zle's back** — printing to /dev/tty from a widget (spinners, `printf '\n…'` status lines) or `zle -I` before a blocking call left zle redrawing the prompt a line too high, over earlier output. Show progress and results with `zle -M` (plain text), and don't clear it with `zle -M ""` in the same widget that redraws; zle drops the message on the next keypress itself.
+- **One daemon, enforced by a lock** — the daemon holds an exclusive `flock` on `ghst.lock` next to the socket for its lifetime; a second one exits at once. Only the lock holder deletes the socket and pid files, and SIGTERM wakes the main loop so the process really exits (with a hard exit after 5s). Previously stopped daemons lingered and, at their idle timeout, deleted the live daemon's socket, silently breaking suggestions.
+- **Self-healing** — when the socket is missing or refuses connections, the shell runs `ghst start` in the background (at most every 10s), so an idle-timed-out or crashed daemon comes back on the next keystroke.
 - **IPC timeouts** — `__ghst_request` must have a timeout (socat `-T`, python `settimeout`). Without it, socat hangs forever on stale sockets from crashed daemons, freezing the shell.
 - **Ctrl+Z undo** — reverts NL-generated commands back to the original buffer
 - **ChatGPT plan provider** — `provider.name = "chatgpt"` follows OpenAI's open-source SIWC flow: register with `client_id=dynamic_agent_client` on first sign-in, then reuse the issued client ID; redirect to `http://127.0.0.1:1455/auth/callback`; verify the ID token (RS256, done with integer math to avoid a crypto dependency); refresh tokens rotate, so refreshes are serialized. Inference must use `POST /v1/responses` with `store: false, stream: true`, and rejects `temperature` and `max_output_tokens`, so ghost text is capped by closing the stream at the first newline.
+- **Fill-in-the-middle for base coder models** — chat-tuned small models (e.g. Qwen2.5-Coder-1.5B-Instruct) mostly echo the typed text back when asked to continue it; the base model of the same size continues it well. `resolve_autocomplete_mode()` picks `fim` for a local model whose name has "coder" but not "instruct"/"chat": the prompt is a shell transcript in Qwen's `<|fim_prefix|>…<|fim_suffix|>\n<|fim_middle|>` format sent to `/v1/completions`. Measured on oMLX: 1.5B base ≈45ms median with no empty replies, vs ≈180ms for Qwen3-Coder-30B in chat mode.
+- **Recommended models (oMLX)** — ghost text `Qwen2.5-Coder-1.5B-4bit` (base, fill-in-the-middle, ~45ms); Cmd+I `Qwen3-Coder-30B-A3B-Instruct-8bit`. The README's "Recommended setup" section has the measurements; keep it, `config/default.toml` and `ghst help provider` in sync when this changes.
+- **Cmd+I hotkey** — terminals don't send Cmd+key to the shell, so the default `nl_hotkey` is `^G ^[[105;9u`: Ctrl+G plus the "CSI u" code for Cmd+I, which the terminal must be mapped to send (README shows Ghostty and Rex).
 - **Model aliases over dated snapshots** — always use short model aliases (e.g. `claude-sonnet-4-5`, `claude-haiku-4-5`, `gpt-4o`) instead of dated snapshot names

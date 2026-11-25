@@ -70,7 +70,9 @@ class UIConfig:
     autocomplete_delay_short_ms: int = 50
     autocomplete_delay_threshold: int = 8
     autocomplete_min_chars: int = 2
-    nl_hotkey: str = "^G"
+    # Space-separated keys. ^[[105;9u is Cmd+I as terminals send it once
+    # mapped (Rex, Ghostty, kitty "CSI u"); Ctrl+G works where it's free.
+    nl_hotkey: str = "^G ^[[105;9u"
     # Unbound by default so Ctrl+R stays with atuin; set to "^R" to take it over
     history_search_hotkey: str = ""
     cheat_sheet_hotkey: str = "^_"
@@ -90,6 +92,9 @@ class UIConfig:
     # Where past commands come from: "auto" (atuin if installed, else zsh),
     # "atuin", "zsh" or "off"
     history_source: str = "auto"
+    # How ghost text is asked for: "chat" (instruction prompt), "fim"
+    # (fill-in-the-middle on a base coder model), or "auto" to pick by model
+    autocomplete_mode: str = "auto"
     history_match_limit: int = 5
     instant_history: bool = True
     autocomplete_max_tokens: int = 32
@@ -99,6 +104,16 @@ class UIConfig:
 
 HISTORY_SOURCES = ("auto", "atuin", "zsh", "off")
 OPENAI_API_BASE = "https://api.openai.com/v1"
+
+
+def resolve_autocomplete_mode(config: GhstConfig) -> str:
+    """"fim" for a base (non-chat) coder model on a local server, else "chat"."""
+    mode = config.ui.autocomplete_mode
+    if mode in ("chat", "fim"):
+        return mode if profile_id(config.provider) == "local" else "chat"
+    model = config.provider.effective_autocomplete_model.lower()
+    is_base_coder = "coder" in model and not any(w in model for w in ("instruct", "chat", "-it"))
+    return "fim" if is_base_coder and profile_id(config.provider) == "local" else "chat"
 
 
 def profile_id(provider: ProviderConfig) -> str:
@@ -196,6 +211,7 @@ class GhstConfig:
         "proactive_suggestions": ("ui", "proactive_suggestions"),
         "proactive_output_lines": ("ui", "proactive_output_lines"),
         "history_source": ("ui", "history_source"),
+        "autocomplete_mode": ("ui", "autocomplete_mode"),
         "history_match_limit": ("ui", "history_match_limit"),
         "instant_history": ("ui", "instant_history"),
         "autocomplete_max_tokens": ("ui", "autocomplete_max_tokens"),

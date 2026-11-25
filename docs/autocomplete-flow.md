@@ -6,7 +6,7 @@
 # User starts typing a git command
 $ git sta█
 
-# After 200ms pause, ghost text appears (dimmed/grey)
+# After a short pause (100ms; 50ms on longer lines), ghost text appears (dimmed/grey)
 $ git sta‹tus --short›
 
 # User presses Tab or → to accept the full suggestion
@@ -28,7 +28,7 @@ $ git ‹add -p›
 # User ignores it and keeps typing — ghost text clears instantly
 $ git co█
 
-# New suggestion appears after 200ms pause
+# New suggestion appears after a short pause
 $ git co‹mmit -m ""›
 ```
 
@@ -338,8 +338,8 @@ __ghst_self_insert (ZLE widget, bound to all printable chars via range binding)
   │   └── If BUFFER extends LAST_BUFFER and SUGGESTION starts with the extra chars,
   │       trim SUGGESTION and redraw — no API call needed
   ├── Adaptive debounce:
-  │   ├── ${#BUFFER} < 8 → delay = 200ms
-  │   └── ${#BUFFER} >= 8 → delay = 100ms
+  │   ├── ${#BUFFER} < 8 → delay = 100ms
+  │   └── ${#BUFFER} >= 8 → delay = 50ms
   └── exec {timer_fd}< <(sleep $delay && echo fire)
       zle -F $timer_fd __ghst_debounce_fired
         │
@@ -511,7 +511,7 @@ If none of these patterns match, the output is considered routine and no proacti
 ### Regular autocomplete (implemented)
 
 ```
-Keystroke → Adaptive debounce (200ms or 100ms)
+Keystroke → Adaptive debounce (100ms or 50ms)
     → Min chars check → zsocket connect (<1ms) → JSON send
     → Daemon cache check (<1ms)
     → LLM API call (200-500ms cloud, prompt cache hit: 100-250ms)
@@ -539,12 +539,13 @@ Best case: ghost text appears WITH the prompt (zero delay)
 
 | Stage | Optimization |
 |---|---|
-| Keystroke → request | Adaptive debounce (200ms base, 100ms for long buffers); cancel stale in-flight requests via fd cleanup |
+| Keystroke → request | Adaptive debounce (100ms base, 50ms for long buffers); cancel stale in-flight requests via fd cleanup |
 | IPC | `zsocket` (native zsh socket) — no subprocess spawn per request |
 | Request → daemon | Unix socket IPC, <1ms |
 | Daemon → LLM | HTTP/2 connection pooling (skip TLS handshake), small prompt token budget |
 | Prompt prefix | Prompt caching (OpenAI auto-cache, Anthropic explicit `cache_control: ephemeral` + beta header) — ~50% TTFT reduction on cache hit |
-| LLM inference | Small/fast cloud model (`gpt-4o-mini`, `claude-haiku-4-5`), non-streaming |
+| LLM inference | Local base coder model with fill-in-the-middle (recommended: `Qwen2.5-Coder-1.5B-4bit` on oMLX, ~45ms), or a small cloud model; replies stop at the first newline |
+| History first | Best matching past command (atuin or zsh) is sent at once as a `partial` reply, before the model answers |
 | Response → display | `zle -F` fd watcher, no polling; direct `/dev/tty` write |
 | Repeat requests | Response cache on `(buffer, cwd)`, ~60s TTL |
 | User types more | Prefix reuse — trim existing suggestion client-side, no new API call |
@@ -570,7 +571,7 @@ Three parameters significantly affect the quality and verbosity of autocomplete 
 | Accept word-by-word | Shift+→ (right arrow) | Lets user cherry-pick parts of a suggestion |
 | Dismiss | Any non-accept key clears ghost text | Typing clears ghost text and starts a new cycle; no explicit Esc binding needed |
 | Debounce | `exec {fd}< <(sleep $delay && echo fire)` + `zle -F` | Process substitution timer avoids `sched` limitations; fd integrates with ZLE event loop |
-| Debounce timing | 200ms base / 100ms for long buffers (all configurable) | Adaptive — `__GHST_DELAY`, `__GHST_DELAY_SHORT`, `__GHST_DELAY_THRESHOLD` |
+| Debounce timing | 100ms base / 50ms for long buffers (all configurable) | Adaptive — `__GHST_DELAY`, `__GHST_DELAY_SHORT`, `__GHST_DELAY_THRESHOLD` |
 | Min chars | 3 (configurable via `__GHST_MIN_CHARS`) | Single-char suggestions are rarely useful |
 | Proactive on empty buffer | Planned but output capture not yet implemented | Requires non-invasive output capture (FIFO/tee approach was too invasive) |
 | Completion spacing | `_ensure_leading_space()` in daemon for `-\|>&;<()` chars | LLMs sometimes omit leading spaces; heuristic adds them for flag/operator tokens |

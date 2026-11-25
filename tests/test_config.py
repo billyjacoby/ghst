@@ -33,7 +33,7 @@ class TestDefaults:
         assert config.ui.autocomplete_delay_short_ms == 50
         assert config.ui.autocomplete_delay_threshold == 8
         assert config.ui.autocomplete_min_chars == 2
-        assert config.ui.nl_hotkey == "^G"
+        assert config.ui.nl_hotkey == "^G ^[[105;9u"
         assert config.ui.history_search_hotkey == ""
         assert config.ui.error_correction is True
         assert config.ui.proactive_suggestions is True

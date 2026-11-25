@@ -4,8 +4,9 @@ LLM-powered ghost-text autocomplete, natural language commands, and semantic his
 
 ## Features
 
-- **Autocomplete** — Ghost text suggestions as you type, powered by an LLM with shell context. Accept with Tab/→.
-- **Natural Language Commands** — Press Ctrl+G, describe what you want in English, get a shell command.
+- **Autocomplete** — Ghost text as you type: your best matching past command at once (atuin or zsh history), then the model's suggestion. Accept with Tab/→.
+- **Natural Language Commands** — Press Cmd+I (or Ctrl+G), describe what you want in English, get a shell command.
+- **Runs locally or in the cloud** — a local server such as oMLX or Ollama, your ChatGPT Plus/Pro plan, OpenAI, or Anthropic. Set up with `ghst provider`.
 - **History Search** — Search your shell history with natural language instead of substring matching (bind it with `history_search_hotkey`, e.g. `"^R"`).
 
 ## Install
@@ -50,6 +51,34 @@ exec zsh         # reload shell to activate
 
 > **Note:** In dev mode, you must activate the venv (`source .venv/bin/activate`) in each new shell for `ghst` to resolve to your local checkout. Alternatively, use `uv run ghst` without activating. The `eval "$(ghst shell-init zsh)"` line in your `.zshrc` handles this automatically once the venv is active.
 
+## Recommended setup: local models on oMLX
+
+On Apple Silicon this is the fastest setup we've found, and nothing leaves your Mac:
+
+| Job | Model | Size | Speed |
+|---|---|---|---|
+| Ghost text | `mlx-community/Qwen2.5-Coder-1.5B-4bit` (base model, fill-in-the-middle) | ~0.9 GB | ~45ms median |
+| Cmd+I (English → command) | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit` | ~30 GB | ~200–600ms |
+
+1. Install [oMLX](https://github.com/jundot/omlx) and download both models from its model page.
+2. Run `ghst provider`, choose **Local server**, keep `http://localhost:8000/v1`, and accept the offer to reuse oMLX's API key.
+3. Pick the two models above. ghst detects the base coder model and uses fill-in-the-middle for it.
+
+Use the **base** Qwen2.5-Coder model for ghost text, not `-Instruct`. Chat-tuned small models
+mostly repeat what you typed when asked to continue it; the base model of the same size
+continues it. Measured on 14 commands that weren't in history:
+
+| Ghost-text model | Median | No suggestion |
+|---|---|---|
+| Qwen2.5-Coder-1.5B **base**, fill-in-the-middle | 44ms | 0 of 14 |
+| Qwen2.5-Coder-1.5B-Instruct, chat | ~63ms | about half |
+| Qwen2.5-Coder-3B base | 66ms | 2 of 14, and less accurate |
+| Qwen2.5-Coder-7B base | 167ms | 0 of 14 |
+| Qwen3-Coder-30B-A3B-Instruct, chat | 182ms | 0 of 14, the most accurate |
+
+With less memory, use the 1.5B base model for both jobs. For the best suggestions at about 4× the
+latency, use the 30B for ghost text too. Ollama and LM Studio work the same way at their own URLs.
+
 ## Usage
 
 ### Autocomplete
@@ -64,15 +93,22 @@ $ git sta‹tus --short›
 - **Shift+→** — Accept one word at a time
 - **Esc** — Dismiss
 
-### Natural Language Commands (Ctrl+G)
+### Natural Language Commands (Cmd+I or Ctrl+G)
 
 ```
-$ █                          # Press Ctrl+G
+$ █                          # Press Cmd+I
 ghst> find python files modified this week
 $ find . -name "*.py" -mtime -7█
 ```
 
 The generated command is placed in your buffer for review — **never auto-executed**. Press **Ctrl+Z** to undo and restore your original buffer.
+
+Terminals don't pass Cmd+key to the shell by default, so map Cmd+I to the key code ghst listens for (`ESC [105;9u`):
+
+- **Ghostty** (`~/.config/ghostty/config`): `keybind = cmd+i=text:\x1b[105;9u`
+- **Rex** (`~/.config/rex/init.lua`): `rex.bind("cmd+i", "com.superlogical.terminal.write", { data = "\27[105;9u" })`
+
+Ctrl+G works without any mapping unless your terminal uses it, as zellij-style Rex configs do for "locked" mode.
 
 ### History Search (`history_search_hotkey`, unbound by default)
 
@@ -91,25 +127,27 @@ Press Ctrl+/ at any time to see a quick reference of all shortcuts.
 Config file: `~/.config/ghst/config.toml`
 
 ```toml
-[provider]
-name = "openai"                         # "openai" or "anthropic"
-api_key = "sk-..."                      # Or set GHST_API_KEY env var
-model = "gpt-4o"                        # Model for NL commands
-autocomplete_model = "gpt-4o-mini"      # Fast model for autocomplete
+[provider]                              # easiest to set with `ghst provider`
+name = "openai"                         # "openai" (OpenAI or a local server), "anthropic", "chatgpt"
+api_base_url = "http://localhost:8000/v1"   # oMLX; leave out for OpenAI itself
+api_key = "..."                         # Or set GHST_API_KEY env var
+model = "Qwen3-Coder-30B-A3B-Instruct-8bit"       # Cmd+I: English → command
+autocomplete_model = "Qwen2.5-Coder-1.5B-4bit"    # ghost text: fast base model
 
 [ui]
 autocomplete_delay_ms = 100             # Debounce delay (ms)
 autocomplete_min_chars = 2              # Min chars before autocomplete fires
-nl_hotkey = "^G"                        # NL command hotkey
+nl_hotkey = "^G ^[[105;9u"              # Cmd+I / Ctrl+G (space-separated keys)
 history_search_hotkey = ""              # History search hotkey ("" = unbound, "^R" to take Ctrl+R)
 history_source = "auto"                 # Past commands: "auto" (atuin, else zsh), "atuin", "zsh", "off"
+autocomplete_mode = "auto"              # "chat", or "fim" (fill-in-the-middle) for base coder models
 history_match_limit = 5                 # How many past commands to use
 instant_history = true                  # Show the best past command before the model answers
 autocomplete_max_tokens = 32            # Longest ghost-text reply
 autocomplete_timeout_ms = 3000          # Give up on a ghost-text request after this long
 rate_limit_rpm = 240                    # Most model requests per minute
 ghost_color = "#6e7681"                 # Ghost text color (hex or 256-color index)
-accent_color = "#79c0ff"                # Prompt accent color (ghst>, spinner)
+accent_color = "#79c0ff"                # Prompt accent color (ghst>)
 success_color = "#56d364"               # Success indicator (✓)
 warning_color = "#e3b341"               # Warning indicator (⚠)
 error_color = "#f85149"                 # Error indicator (✗)
@@ -140,7 +178,7 @@ requests stop; ghst never switches to paid API billing.
 |---|---|
 | `ghst provider` | Pick a provider with the arrow keys and connect: local server (oMLX, Ollama, LM Studio), ChatGPT plan, OpenAI or Anthropic. Ends with a timed test suggestion |
 | `ghst provider set <local\|chatgpt\|openai\|anthropic>` | Same, skipping the menu |
-| `ghst model` | Pick the ghost-text and Ctrl+G models from the server's list (type to filter) |
+| `ghst model` | Pick the ghost-text and Cmd+I models from the server's list (type to filter) |
 | `ghst model list` / `ghst model set <name>` | List models, or set one directly |
 | `ghst login` / `ghst logout` | Sign in with ChatGPT to use your plan / sign out |
 | `ghst status` | Daemon, provider, server check, ChatGPT account, last error |
@@ -208,7 +246,6 @@ Planned features for future releases:
 - **Error Correction** — Auto-suggest fixes as ghost text when a command fails
 - **Proactive Suggestions** — Read the last command's output and suggest the next command on an empty prompt
 - **Bash & Fish Support** — Extend autocomplete and NL commands beyond zsh
-- **Local Model Support** — Optimized flows for Ollama, LM Studio, and other local inference servers
 - **Homebrew Installation** — `brew install ghst` via a Homebrew tap
 
 ## Development

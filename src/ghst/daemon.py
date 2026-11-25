@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -23,11 +24,12 @@ from typing import Any
 
 import httpx
 
-from ghst.config import GhstConfig, resolve_history_source
+from ghst.config import GhstConfig, resolve_autocomplete_mode, resolve_history_source
 from ghst.context import ContextInfo
 from ghst.llm import TIMEOUT_HISTORY, TIMEOUT_NL, LLMClient
 from ghst.prompts import (
     COMMAND_SYSTEM,
+    autocomplete_fim,
     autocomplete_system,
     autocomplete_user,
     error_correction_user,
@@ -189,6 +191,8 @@ class GhstDaemon:
         self._last_activity: float = 0.0
         self._rate_limiter = RateLimiter(self.config.ui.rate_limit_rpm)
         self._inflight_complete: asyncio.Task[dict[str, Any]] | None = None
+        self._stopping = asyncio.Event()
+        self._lock_file: Any = None
 
     async def handle_request(self, data: dict[str, Any]) -> dict[str, Any]:
         """Route a request to the appropriate handler."""
@@ -277,25 +281,34 @@ class GhstDaemon:
             if not isinstance(raw_matches, list):
                 raw_matches = await self._history_matches(buffer, cwd)
             history_matches = sanitize_history([m for m in raw_matches if isinstance(m, str)])
-            messages = [
-                {"role": "system", "content": autocomplete_system()},
-                {"role": "user", "content": autocomplete_user(
-                    buffer=buffer, cwd=cwd, history=history, shell=shell,
-                    exit_status=exit_status,
+            messages: list[dict[str, Any]] = []
+            fim_prompt = ""
+            if resolve_autocomplete_mode(self.config) == "fim":
+                fim_prompt = autocomplete_fim(
+                    buffer=buffer, cwd=cwd, history=history,
                     dir_listing=ctx.dir_listing(cwd, max_entries=20),
-                    git_branch=ctx.git_branch,
-                    git_dirty=ctx.git_dirty,
-                    git_branches=ctx.git_branches,
-                    project_types=ctx.project_types,
-                    active_env=ContextInfo.active_env(),
-                    history_matches=history_matches,
-                )},
-            ]
+                    git_branch=ctx.git_branch, history_matches=history_matches,
+                )
+            else:
+                messages = [
+                    {"role": "system", "content": autocomplete_system()},
+                    {"role": "user", "content": autocomplete_user(
+                        buffer=buffer, cwd=cwd, history=history, shell=shell,
+                        exit_status=exit_status,
+                        dir_listing=ctx.dir_listing(cwd, max_entries=20),
+                        git_branch=ctx.git_branch,
+                        git_dirty=ctx.git_dirty,
+                        git_branches=ctx.git_branches,
+                        project_types=ctx.project_types,
+                        active_env=ContextInfo.active_env(),
+                        history_matches=history_matches,
+                    )},
+                ]
             cache_key = ("autocomplete", buffer, cwd)
             model = self.config.provider.effective_autocomplete_model
             suggestion = await self.llm.complete(
                 messages, model=model, timeout=self._autocomplete_timeout,
-                use_cache_key=cache_key, single_line=True,
+                use_cache_key=cache_key, single_line=True, fim_prompt=fim_prompt,
             )
             suggestion = _strip_echo(buffer, suggestion)
             # FIM post-process: ensure leading space for special chars
@@ -345,6 +358,8 @@ class GhstDaemon:
         command = await self.llm.complete_with_retry(
             messages, model=model, timeout=TIMEOUT_NL, retries=1,
         )
+        # Models often wrap the command in a markdown fence or a "$ " prompt
+        command = _strip_code_fences(command).removeprefix("$ ").strip()
 
         response: dict[str, Any] = {"type": "nl", "command": command}
 
@@ -490,14 +505,29 @@ class GhstDaemon:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
+    def _acquire_lock(self) -> bool:
+        """Hold an exclusive lock for our lifetime so only one daemon runs."""
+        lock_path = self.config.get_socket_path().with_suffix(".lock")
+        self._lock_file = open(lock_path, "w")  # noqa: SIM115 — held until exit
+        try:
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self._lock_file.close()
+            self._lock_file = None
+            return False
+        return True
+
     async def start(self) -> None:
         """Start the daemon socket server."""
         socket_path = self.config.get_socket_path()
         pid_path = self.config.get_pid_path()
 
-        # Clean up stale socket
-        if socket_path.exists():
-            socket_path.unlink()
+        if not self._acquire_lock():
+            logger.info("another ghst daemon is already running; exiting")
+            return
+
+        # We hold the lock, so any socket file left behind is stale
+        socket_path.unlink(missing_ok=True)
 
         self._server = await asyncio.start_unix_server(
             self._handle_connection, path=str(socket_path)
@@ -513,26 +543,35 @@ class GhstDaemon:
         logger.info("ghst daemon started (pid %d, socket %s)", os.getpid(), socket_path)
 
         async with self._server:
-            while True:
-                await asyncio.sleep(60)  # check every minute
+            while not self._stopping.is_set():
+                # Wake every minute to check for idleness, or at once on stop()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._stopping.wait(), timeout=60)
                 idle = asyncio.get_event_loop().time() - self._last_activity
                 if idle >= self.IDLE_TIMEOUT_SECONDS:
                     logger.info("Idle timeout (%.0fs) — shutting down", idle)
                     break
+                if not socket_path.exists():
+                    # Unreachable without it; exit so the shell can start a new one
+                    logger.warning("socket file was removed — shutting down")
+                    break
             await self.stop()
 
     async def stop(self) -> None:
-        """Stop the daemon."""
+        """Stop serving and let start() return so the process exits."""
+        lock, self._lock_file = self._lock_file, None
+        if lock is None:
+            return  # never started, or another stop() is already cleaning up
+        self._stopping.set()
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
-        await self.llm.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.llm.close(), timeout=2)
 
-        # Clean up
-        socket_path = self.config.get_socket_path()
-        pid_path = self.config.get_pid_path()
-        socket_path.unlink(missing_ok=True)
-        pid_path.unlink(missing_ok=True)
+        # Only the lock holder owns these files
+        self.config.get_socket_path().unlink(missing_ok=True)
+        self.config.get_pid_path().unlink(missing_ok=True)
+        lock.close()
 
         logger.info("ghst daemon stopped")
 
@@ -555,8 +594,15 @@ async def _run() -> None:
     daemon = GhstDaemon()
 
     loop = asyncio.get_running_loop()
+
+    def on_signal() -> None:
+        # Wake start() so it runs stop() and returns; if cleanup hangs, exit
+        # anyway so the single-instance lock is released
+        daemon._stopping.set()
+        loop.call_later(5, os._exit, 0)
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(daemon.stop()))
+        loop.add_signal_handler(sig, on_signal)
 
     await daemon.start()
 

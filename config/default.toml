@@ -2,21 +2,25 @@
 # Copy to ~/.config/ghst/config.toml and edit as needed.
 
 [provider]
-# LLM provider: "openai" or "anthropic"
+# Easiest to set with `ghst provider`, which also remembers each provider's
+# settings under [profiles.*].
+# "openai" (OpenAI or any OpenAI-compatible local server), "anthropic", or
+# "chatgpt" (your ChatGPT plan; sign in with `ghst login`)
 name = "openai"
 
 # API key (or set GHST_API_KEY environment variable)
-# api_key = "sk-..."
+# api_key = "..."
 
-# API base URL (defaults per provider; override for OpenAI-compatible servers)
-# api_base_url = "https://api.openai.com/v1"
+# Server URL. Recommended: oMLX on this Mac. Leave out for OpenAI itself.
+api_base_url = "http://localhost:8000/v1"
 
-# Model for NL commands and history search
-model = "gpt-4o"
+# Model for Cmd+I (English to command) and history search
+model = "Qwen3-Coder-30B-A3B-Instruct-8bit"
 
-# Fast model for autocomplete, proactive suggestions, and error correction
+# Fast model for ghost text. A *base* coder model (not -Instruct) gets
+# fill-in-the-middle prompts and is the fastest good option.
 # Defaults to the value of `model` if not set.
-# autocomplete_model = "gpt-4o-mini"
+autocomplete_model = "Qwen2.5-Coder-1.5B-4bit"
 
 [ui]
 # Base debounce delay (ms) before triggering autocomplete
@@ -50,8 +54,9 @@ autocomplete_timeout_ms = 3000
 # Most model requests per minute
 rate_limit_rpm = 240
 
-# Hotkey for natural language command prompt
-nl_hotkey = "^G"
+# Hotkeys for the natural language command prompt (space-separated).
+# ^[[105;9u is Cmd+I once the terminal is mapped to send it (see README).
+nl_hotkey = "^G ^[[105;9u"
 
 # Hotkey for natural language history search. Empty = unbound, which leaves
 # Ctrl+R to atuin or zsh; set to "^R" to take Ctrl+R over.

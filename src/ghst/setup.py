@@ -140,7 +140,7 @@ def _default_index(models: list[str], current: str, prefer_fast: bool) -> int:
 # ── Flows ────────────────────────────────────────────────────────────────────
 
 def choose_models(config: GhstConfig) -> bool:
-    """Pick the ghost-text and Ctrl+G models from the server's list."""
+    """Pick the ghost-text and Cmd+I models from the server's list."""
     provider = config.provider
     pid = profile_id(provider)
     print("  Checking the server…")
@@ -150,14 +150,14 @@ def choose_models(config: GhstConfig) -> bool:
         if not confirm("Type the model names yourself?", default=False):
             return False
         provider.autocomplete_model = ask("Ghost-text model", provider.effective_autocomplete_model)
-        provider.model = ask("Ctrl+G model", provider.model)
+        provider.model = ask("Cmd+I model", provider.model)
         return True
 
     models = usable_models(pid, health.get("models", []))
     if not models:
         print("  The server listed no models; type the names instead.")
         provider.autocomplete_model = ask("Ghost-text model", provider.effective_autocomplete_model)
-        provider.model = ask("Ctrl+G model", provider.model)
+        provider.model = ask("Cmd+I model", provider.model)
         return True
 
     def options(current: str) -> list[Option]:
@@ -171,7 +171,7 @@ def choose_models(config: GhstConfig) -> bool:
     if ac is None:
         return False
     nl = pick(
-        "Ctrl+G model (plain English to command):", options(provider.model),
+        "Cmd+I model (plain English to command):", options(provider.model),
         _default_index(models, provider.model, prefer_fast=False),
     )
     if nl is None:
@@ -290,8 +290,11 @@ def report(config: GhstConfig) -> None:
     pid = profile_id(provider)
     print(f"\n  ✓ {PROVIDER_LABELS[pid]}", end="")
     print(f" ({provider.api_base_url})" if pid == "local" else "")
-    print(f"    ghost text: {provider.effective_autocomplete_model}")
-    print(f"    Ctrl+G:     {provider.model}")
+    from ghst.config import resolve_autocomplete_mode
+
+    mode = "fill-in-the-middle" if resolve_autocomplete_mode(config) == "fim" else "chat"
+    print(f"    ghost text: {provider.effective_autocomplete_model}  ({mode})")
+    print(f"    Cmd+I:      {provider.model}")
     if pid == "chatgpt":
         from ghst.chatgpt import USAGE_URL
 
