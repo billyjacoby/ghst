@@ -9,10 +9,10 @@ $ git sta█
 # After a short pause (100ms; 50ms on longer lines), ghost text appears (dimmed/grey)
 $ git sta‹tus --short›
 
-# User presses Tab or → to accept the full suggestion
+# User presses Tab to accept the full suggestion
 $ git status --short█
 
-# Or presses → once to accept one word at a time
+# Or presses → to accept one word (or one path segment, up to a "/") at a time
 $ git status█ ‹--short›
 ```
 
@@ -86,7 +86,7 @@ $ cd ~/Docu█
 # Fresh prompt appears with ghost text IMMEDIATELY (before typing anything)
 $ ‹copilot --resume=64a11e60-0fe6-4517-9e1b-3675ac2cccf2›
 
-# Tab or → to accept, then Enter to run
+# Tab to accept, then Enter to run
 $ copilot --resume=64a11e60-0fe6-4517-9e1b-3675ac2cccf2█
 
 # Or start typing something else — ghost text clears instantly
@@ -267,7 +267,7 @@ User sees: $ ‹copilot --resume=64a11e60-...›
   │
   ▼
 Same accept/dismiss behavior as regular autocomplete:
-  ├── Tab or →     → accept into $BUFFER
+  ├── Tab          → accept into $BUFFER (→ one word at a time)
   ├── Any other key → clear ghost text, normal typing
   └── Esc           → dismiss
 ```
@@ -400,8 +400,9 @@ __ghst_self_insert (ZLE widget, bound to all printable chars via range binding)
         │
         ▼
   Next keystroke:
-  ├── → (right arrow) → __ghst_accept_suggestion: BUFFER+=$SUGGESTION, CURSOR=end
-  ├── Shift+→         → __ghst_accept_word: accept first word, redraw rest as ghost
+  ├── → (right arrow) → __ghst_accept_word: accept up to and including the next "/" or
+  │                     run of spaces, redraw the rest as ghost
+  ├── Shift+→         → __ghst_accept_suggestion: BUFFER+=$SUGGESTION, CURSOR=end
   ├── Tab              → accept if suggestion exists, else native zsh completion
   ├── Enter            → __ghst_line_finish: clear ghost, cancel debounce, accept-line
   ├── Backspace        → clear ghost, delete char, reschedule if len >= min_chars
@@ -545,7 +546,7 @@ Best case: ghost text appears WITH the prompt (zero delay)
 | Daemon → LLM | HTTP/2 connection pooling (skip TLS handshake), small prompt token budget |
 | Prompt prefix | Prompt caching (OpenAI auto-cache, Anthropic explicit `cache_control: ephemeral` + beta header) — ~50% TTFT reduction on cache hit |
 | LLM inference | Local base coder model with fill-in-the-middle (recommended: `Qwen2.5-Coder-1.5B-4bit` on oMLX, ~45ms), or a small cloud model; replies stop at the first newline |
-| History first | Best matching past command (atuin or zsh) is sent at once as a `partial` reply, before the model answers |
+| History first | Best matching past command (atuin or zsh) is sent at once as a `partial` reply, before the model answers. The model's answer then replaces it only if it extends that command; a different guess is dropped |
 | Response → display | `zle -F` fd watcher, no polling; direct `/dev/tty` write |
 | Repeat requests | Response cache on `(buffer, cwd)`, ~60s TTL |
 | User types more | Prefix reuse — trim existing suggestion client-side, no new API call |
@@ -567,8 +568,8 @@ Three parameters significantly affect the quality and verbosity of autocomplete 
 |---|---|---|
 | Ghost text style | Dimmed/grey via ANSI escape codes (`\e[90m`) written directly to `/dev/tty` | Only approach that works on zsh 5.9 macOS — POSTDISPLAY doesn't interpret ANSI, BUFFER is empty in `zle -F` callbacks |
 | IPC mechanism | `zsh/net/socket` (`zsocket`) — native zsh Unix socket | No subprocess per keystroke; fd integrates directly with `zle -F` async watchers |
-| Accept full suggestion | → (right arrow) or Tab | Matches Fish, GitHub Copilot conventions; Tab falls back to native completion |
-| Accept word-by-word | Shift+→ (right arrow) | Lets user cherry-pick parts of a suggestion |
+| Accept full suggestion | Tab (or Shift+→) | Tab falls back to native completion when there is no suggestion |
+| Accept word-by-word | → (right arrow) | One word, or one path segment up to a `/`, per press; lets the user take part of a suggestion |
 | Dismiss | Any non-accept key clears ghost text | Typing clears ghost text and starts a new cycle; no explicit Esc binding needed |
 | Debounce | `exec {fd}< <(sleep $delay && echo fire)` + `zle -F` | Process substitution timer avoids `sched` limitations; fd integrates with ZLE event loop |
 | Debounce timing | 100ms base / 50ms for long buffers (all configurable) | Adaptive — `__GHST_DELAY`, `__GHST_DELAY_SHORT`, `__GHST_DELAY_THRESHOLD` |

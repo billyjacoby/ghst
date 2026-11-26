@@ -405,7 +405,7 @@ def _cmd_init(args: argparse.Namespace) -> None:
         print("  ⚠ Could not connect to daemon — run 'ghst start' manually")
 
     print("\n  You're all set! Open a new shell and start typing.\n")
-    print("    → Autocomplete appears as ghost text (accept with Tab or →)")
+    print("    → Autocomplete appears as ghost text (Tab accepts it, → one word at a time)")
     print("    → Press Cmd+I (or Ctrl+G) to describe a command in English")
     print("    → Press Ctrl+R to search history in plain English")
     print("    → Run `ghst status` to check daemon health")
@@ -674,7 +674,7 @@ HELP_TEXT = """\
     {c}ghst start{/} · {c}ghst stop{/}    Usually automatic; the shell starts it
 
   {b}At the prompt{/}
-    Tab / →   accept the suggestion       Shift+→   accept one word
+    Tab       accept the suggestion       →         accept the next word or dir/
     Esc       dismiss                     Cmd+I     describe a command in English
                                           {d}(Ctrl+G too, where the terminal doesn't take it){/}
     Ctrl+Z    undo a generated command    Ctrl+/    cheat sheet

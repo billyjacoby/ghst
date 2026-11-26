@@ -104,8 +104,8 @@ __ghst_cheat_sheet() {
   ┌─────────────────────────────────────────┐
   │  ghst shortcuts                         │
   │                                         │
-  │  Tab / →     Accept autocomplete        │
-  │  Shift+→     Accept one word            │
+  │  Tab         Accept autocomplete        │
+  │  →           Accept next word or dir/   │
   │  Esc         Dismiss suggestion         │
   │  Cmd+I       Natural language command   │
   │  (or Ctrl+G) describe it in English     │

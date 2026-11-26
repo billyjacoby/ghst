@@ -9,6 +9,7 @@ typeset -g __GHST_PENDING_BUFFER=""
 typeset -g __GHST_REQ_BUFFER=""
 typeset -gi __GHST_PENDING_CURSOR=0
 typeset -gi __GHST_GHOST_VISIBLE=0
+typeset -gi __GHST_FROM_HISTORY=0  # the shown suggestion is a history match
 typeset -g __GHST_RESPONSE_FD=""
 typeset -gi __GHST_AUTOCOMPLETE_DISABLED=0
 
@@ -88,6 +89,7 @@ __ghst_send_request() {
     __ghst_json_str "$PWD"; local cwd_json="$REPLY"
     local json_req="{\"type\":\"complete\",\"request_id\":\"ac-$RANDOM\",\"buffer\":$buf_json,\"cursor_pos\":$cursor_pos,\"cwd\":$cwd_json,\"shell\":\"zsh\",\"history\":[${(j:,:)parts}],\"exit_status\":${__GHST_LAST_EXIT:-0},\"stream_history\":true$match_field}"
     __GHST_REQ_BUFFER="$buffer"
+    __GHST_FROM_HISTORY=0
 
     # Close any previous in-flight request
     if [[ -n "$__GHST_RESPONSE_FD" ]]; then
@@ -123,7 +125,10 @@ __ghst_on_response() {
     fi
 
     # A "partial" line is the instant history match; the model's answer follows
-    if [[ "$response" != *'"partial": true'* ]]; then
+    local partial=0
+    if [[ "$response" == *'"partial": true'* ]]; then
+        partial=1
+    else
         zle -F $fd
         { exec {fd}<&- } 2>/dev/null
         __GHST_RESPONSE_FD=""
@@ -160,8 +165,13 @@ __ghst_on_response() {
     [[ "${suggestion:0:${#extra}}" == "$extra" ]] || return
     suggestion="${suggestion:${#extra}}"
     [[ -z "$suggestion" || "$suggestion" == "$__GHST_SUGGESTION" ]] && return
+    # A command from your history beats a guess: the model may only extend it
+    if (( __GHST_FROM_HISTORY && ! partial )) && [[ -n "$__GHST_SUGGESTION" ]]; then
+        [[ "$suggestion" == "$__GHST_SUGGESTION"* ]] || return
+    fi
 
     __ghst_erase_ghost
+    __GHST_FROM_HISTORY=$partial
     __GHST_SUGGESTION="$suggestion"
     __GHST_LAST_BUFFER="$BUFFER"
     zle -R
@@ -226,7 +236,7 @@ __ghst_cancel_debounce() {
     fi
 }
 
-# ── Accept full suggestion (→) ───────────────────────────────────────────────
+# ── Accept full suggestion (Tab) ────────────────────────────────────────────
 __ghst_accept_suggestion() {
     if [[ -n "$__GHST_SUGGESTION" ]]; then
         __ghst_erase_ghost
@@ -249,8 +259,9 @@ __ghst_dismiss() {
     [[ "$KEYMAP" == (main|viins) && "$(bindkey -lL main)" == *viins* ]] && zle vi-cmd-mode
 }
 
-# ── Accept one word (Shift+→) ───────────────────────────────────────────────
+# ── Accept one word or path segment (→) ─────────────────────────────────────
 __ghst_accept_word() {
+    setopt localoptions extendedglob
     if [[ -n "$__GHST_SUGGESTION" ]]; then
         __ghst_erase_ghost
         __ghst_cancel_debounce
@@ -259,15 +270,16 @@ __ghst_accept_word() {
             { exec {__GHST_RESPONSE_FD}<&- } 2>/dev/null
             __GHST_RESPONSE_FD=""
         fi
-        local first_word="${__GHST_SUGGESTION%% *}"
-        local rest="${__GHST_SUGGESTION#* }"
-        if [[ "$first_word" == "$__GHST_SUGGESTION" ]]; then
+        # The next piece: leading spaces, then up to and including the next
+        # "/" or the spaces after the word ("src/" then "ghst/" then "shell")
+        local piece="${(M)__GHST_SUGGESTION##[[:space:]]#[^[:space:]/]#(/|[[:space:]]##|)}"
+        if [[ -z "$piece" || "$piece" == "$__GHST_SUGGESTION" ]]; then
             __ghst_accept_suggestion
             return
         fi
-        BUFFER="${BUFFER}${first_word} "
+        BUFFER="${BUFFER}${piece}"
         CURSOR=${#BUFFER}
-        __GHST_SUGGESTION="$rest"
+        __GHST_SUGGESTION="${__GHST_SUGGESTION:${#piece}}"
         __GHST_LAST_BUFFER="$BUFFER"
         zle -R
         __ghst_draw_ghost
@@ -341,9 +353,9 @@ zle -N __ghst_on_response
 # ── Keybindings ──────────────────────────────────────────────────────────────
 bindkey -M main -R ' '-'~' __ghst_self_insert   # All printable chars
 bindkey '^?' __ghst_backward_delete              # Backspace
-bindkey '^[[C' __ghst_accept_suggestion          # Right arrow — accept full
-bindkey '^[OC' __ghst_accept_suggestion          # Right arrow (application mode)
-bindkey '^[[1;2C' __ghst_accept_word             # Shift+Right — accept word
+bindkey '^[[C' __ghst_accept_word                # Right arrow — accept one word or path segment
+bindkey '^[OC' __ghst_accept_word                # Right arrow (application mode)
+bindkey '^[[1;2C' __ghst_accept_suggestion       # Shift+Right — accept full
 bindkey '\t' __ghst_tab_accept                   # Tab
 bindkey '^M' __ghst_line_finish                  # Enter
 bindkey '\e' __ghst_dismiss                      # Esc — dismiss suggestion

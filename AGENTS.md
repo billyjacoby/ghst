@@ -58,7 +58,7 @@ tests/
 | `health` | (none) — the daemon checks the LLM server and replies with `ok`, `error`, `latency_ms`, `unlisted_models`, `circuit` |
 
 \* `last_command` and `last_output` are optional fields sent only for proactive suggestions.
-† With `stream_history`, the daemon may first send a line with `"partial": true` holding the best past command, then the model's answer on a second line. `suggestion` is always the last field of a reply; the shell parses it from the end.
+† With `stream_history`, the daemon may first send a line with `"partial": true` holding the best past command, then the model's answer on a second line. The shell keeps the history match unless the model's answer extends it. `suggestion` is always the last field of a reply; the shell parses it from the end.
 ‡ `history_matches` is sent by the shell when `history_source` is zsh; for atuin the daemon looks them up itself.
 
 ### Configuration (`~/.config/ghst/config.toml`)

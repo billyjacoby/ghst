@@ -4,7 +4,7 @@ LLM-powered ghost-text autocomplete, natural language commands, and semantic his
 
 ## Features
 
-- **Autocomplete** — Ghost text as you type: your best matching past command at once (atuin or zsh history), then the model's suggestion. Accept with Tab/→.
+- **Autocomplete** — Ghost text as you type: your best matching past command at once (atuin or zsh history), then the model's suggestion (which may extend that command, not replace it). Tab accepts it all, → one piece at a time.
 - **Natural Language Commands** — Press Cmd+I (or Ctrl+G), describe what you want in English, get a shell command.
 - **Runs locally or in the cloud** — a local server such as oMLX or Ollama, your ChatGPT Plus/Pro plan, OpenAI, or Anthropic. Set up with `ghst provider`.
 - **History Search** — Search your shell history with natural language instead of substring matching (bind it with `history_search_hotkey`, e.g. `"^R"`).
@@ -89,8 +89,8 @@ Just start typing. After a brief pause, ghost text appears with a suggestion:
 $ git sta‹tus --short›
 ```
 
-- **Tab** or **→** — Accept the full suggestion
-- **Shift+→** — Accept one word at a time
+- **Tab** (or **Shift+→**) — Accept the full suggestion
+- **→** — Accept the next word or path segment (`src/`, then `ghst/`, …)
 - **Esc** — Dismiss
 
 ### Natural Language Commands (Cmd+I or Ctrl+G)
